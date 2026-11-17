@@ -1,6 +1,6 @@
 import os
 from datetime import datetime
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, ForeignKey, Boolean, Text, Index
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, ForeignKey, Boolean, Text, Index, inspect, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from dotenv import load_dotenv
@@ -13,11 +13,13 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 print("Using DATABASE_URL:", DATABASE_URL)
 
+
 class User(Base):
     __tablename__ = 'users'
     id = Column(Integer, primary_key=True)
     username = Column(String(50), unique=True, nullable=False, index=True)
     password_hash = Column(String(128), nullable=False)
+    email = Column(String(120), unique=True, nullable=True, index=True)
     first_name = Column(String(50), nullable=True)
     last_name = Column(String(50), nullable=True)
     nickname = Column(String(50), unique=True, nullable=True)
@@ -29,25 +31,30 @@ class User(Base):
     chat_members = relationship('ChatMember', back_populates='user')
     push_subscriptions = relationship('PushSubscription', back_populates='user')
 
+
 class Chat(Base):
     __tablename__ = 'chats'
     id = Column(Integer, primary_key=True)
     name = Column(String(100), nullable=True)
     is_group = Column(Boolean, default=False)
+    owner_id = Column(Integer, ForeignKey('users.id'), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     members = relationship('ChatMember', back_populates='chat')
     messages = relationship('Message', back_populates='chat')
+
 
 class ChatMember(Base):
     __tablename__ = 'chat_members'
     id = Column(Integer, primary_key=True)
     chat_id = Column(Integer, ForeignKey('chats.id'), index=True)
     user_id = Column(Integer, ForeignKey('users.id'), index=True)
+    role = Column(String(20), default='member')  # 'owner' | 'admin' | 'member'
     joined_at = Column(DateTime, default=datetime.utcnow)
 
     chat = relationship('Chat', back_populates='members')
     user = relationship('User', back_populates='chat_members')
+
 
 class Message(Base):
     __tablename__ = 'messages'
@@ -65,6 +72,7 @@ class Message(Base):
     author = relationship('User', back_populates='messages', foreign_keys=[user_id])
     reads = relationship('MessageRead', back_populates='message', cascade='all, delete-orphan')
 
+
 class MessageRead(Base):
     __tablename__ = 'message_reads'
     id = Column(Integer, primary_key=True)
@@ -74,6 +82,7 @@ class MessageRead(Base):
 
     message = relationship('Message', back_populates='reads')
     user = relationship('User')
+
 
 class PushSubscription(Base):
     __tablename__ = 'push_subscriptions'
@@ -86,12 +95,14 @@ class PushSubscription(Base):
 
     user = relationship('User', back_populates='push_subscriptions')
 
+
 class MessageHistory(Base):
     __tablename__ = 'message_history'
     id = Column(Integer, primary_key=True)
     message_id = Column(Integer, ForeignKey('messages.id'), index=True)
     old_text = Column(Text)
     edited_at = Column(DateTime, default=datetime.utcnow)
+
 
 class ConnectionLog(Base):
     __tablename__ = 'connection_logs'
@@ -101,5 +112,46 @@ class ConnectionLog(Base):
     reason = Column(String(255))
     timestamp = Column(DateTime, default=datetime.utcnow)
 
-# Создание таблиц
+
+class PasswordResetToken(Base):
+    __tablename__ = 'password_reset_tokens'
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey('users.id'), index=True)
+    token = Column(String(64), unique=True, nullable=False, index=True)
+    expires_at = Column(DateTime, nullable=False)
+    used = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+# Создание таблиц и «мягкая» миграция существующих
 Base.metadata.create_all(engine)
+
+
+def ensure_columns():
+    """Добавляет новые колонки в существующие таблицы (SQLite не умеет ALTER через ORM)."""
+    inspector = inspect(engine)
+    with engine.begin() as conn:
+        try:
+            user_cols = {c['name'] for c in inspector.get_columns('users')}
+            if 'email' not in user_cols:
+                conn.execute(text("ALTER TABLE users ADD COLUMN email VARCHAR(120)"))
+                try:
+                    conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_users_email ON users(email)"))
+                except Exception as e:
+                    print("Index on users.email not created:", e)
+                print("✅ Migrated: users.email")
+
+            chat_cols = {c['name'] for c in inspector.get_columns('chats')}
+            if 'owner_id' not in chat_cols:
+                conn.execute(text("ALTER TABLE chats ADD COLUMN owner_id INTEGER"))
+                print("✅ Migrated: chats.owner_id")
+
+            member_cols = {c['name'] for c in inspector.get_columns('chat_members')}
+            if 'role' not in member_cols:
+                conn.execute(text("ALTER TABLE chat_members ADD COLUMN role VARCHAR(20) DEFAULT 'member'"))
+                print("✅ Migrated: chat_members.role")
+        except Exception as e:
+            print("Migration warning:", e)
+
+
+ensure_columns()

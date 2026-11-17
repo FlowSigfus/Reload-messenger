@@ -287,3 +287,18 @@ body.dark-theme #timeline-list div{border-bottom-color:#2f3542}
 .user-info .avatar{cursor:pointer}
 .user-info .user-name{cursor:pointer}
 #avatar-img{width:48px;height:48px;border-radius:50%;object-fit:cover}
+
+/* ----- Forgot / Reset Password ----- */
+.forgot-link{display:block;text-align:center;margin-top:12px;color:#2c7be5;font-size:13px;text-decoration:none}
+.forgot-link:hover{text-decoration:underline}
+body.cyberpunk-theme .forgot-link{color:#00ffcc}
+body.retro-theme .forgot-link{color:#5e4b3c}
+
+#forgot-password-form,#reset-password-form{margin-top:16px;padding-top:16px;border-top:1px solid #e0e0e0}
+body.dark-theme #forgot-password-form,body.dark-theme #reset-password-form{border-top-color:#2f3542}
+body.cyberpunk-theme #forgot-password-form,body.cyberpunk-theme #reset-password-form{border-top-color:#00ffcc}
+body.retro-theme #forgot-password-form,body.retro-theme #reset-password-form{border-top-color:#8b7a6b}
+#forgot-password-form input,#reset-password-form input{width:100%;margin-bottom:12px;padding:12px;border:1px solid #ccc;border-radius:30px}
+body.dark-theme #forgot-password-form input,body.dark-theme #reset-password-form input{background:#3a3f4b;border-color:#2f3542;color:#e4e6eb}
+body.cyberpunk-theme #forgot-password-form input,body.cyberpunk-theme #reset-password-form input{background:#0f1722;border-color:#00ffcc;color:#00ffcc}
+body.retro-theme #forgot-password-form input,body.retro-theme #reset-password-form input{background:#fffdf9;border-color:#8b7a6b;border-radius:0}

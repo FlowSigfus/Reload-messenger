@@ -6,20 +6,174 @@ import {
     loadMoreMessages, hasMoreMessages, loadingMessages, deleteChat,
     searchMessages, editMessage, deleteMessage
 } from './chat.js';
-import { updatePushStatus, applyTheme, toggleSidebar, closeSidebar, loadProfileForm, saveProfile } from './ui.js';
+import { updatePushStatus, applyTheme, toggleSidebar, closeSidebar, loadProfileForm, saveProfile, importTheme } from './ui.js';
 import { subscribeToPush } from './push.js';
 import { openGroupModal, searchUsers, createGroup } from './groups.js';
 import { toggleRecording } from './voice.js';
 
 let stateManager, terminalModule;
+let authMode = 'login';
 
-async function loadStateManager() {
-    if (!stateManager) {
-        stateManager = await import('./stateManager.js');
-    }
-    return stateManager;
+function debounce(fn, ms) {
+    let t;
+    return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
 }
 
+// ============ AUTH ============
+
+function setupAuthListeners() {
+    const showRegisterBtn = document.getElementById('show-register-fields');
+    const registerFields = document.getElementById('register-fields');
+    const loginBtn = document.getElementById('login-btn');
+    const forgotForm = document.getElementById('forgot-password-form');
+    const resetForm = document.getElementById('reset-password-form');
+    const showForgotLink = document.getElementById('show-forgot-password');
+    const cancelForgotBtn = document.getElementById('cancel-forgot-btn');
+    const sendResetBtn = document.getElementById('send-reset-btn');
+    const resetPasswordBtn = document.getElementById('reset-password-btn');
+
+    const urlParams = new URLSearchParams(window.location.search);
+    const resetToken = urlParams.get('reset_token');
+    if (resetToken && resetForm) {
+        resetForm.style.display = 'block';
+        resetForm.dataset.token = resetToken;
+        document.querySelector('.login-card h2').textContent = 'Восстановление пароля';
+    }
+
+    if (showRegisterBtn) {
+        showRegisterBtn.onclick = () => {
+            const show = !registerFields.style.display || registerFields.style.display === 'none';
+            registerFields.style.display = show ? 'block' : 'none';
+            authMode = show ? 'register' : 'login';
+            showRegisterBtn.textContent = show ? 'Скрыть поля' : 'Регистрация';
+            if (loginBtn) loginBtn.textContent = show ? 'Зарегистрироваться' : 'Войти';
+            if (forgotForm) forgotForm.style.display = 'none';
+        };
+    }
+    if (loginBtn) loginBtn.onclick = () => authMode === 'register' ? doRegister() : doLogin();
+
+    if (showForgotLink) {
+        showForgotLink.onclick = (e) => {
+            e.preventDefault();
+            if (forgotForm) forgotForm.style.display = 'block';
+            if (registerFields) registerFields.style.display = 'none';
+            authMode = 'login';
+            if (loginBtn) loginBtn.textContent = 'Войти';
+            if (showRegisterBtn) showRegisterBtn.textContent = 'Регистрация';
+        };
+    }
+    if (cancelForgotBtn) cancelForgotBtn.onclick = () => { forgotForm.style.display = 'none'; };
+    if (sendResetBtn) sendResetBtn.onclick = () => sendPasswordReset();
+    if (resetPasswordBtn) resetPasswordBtn.onclick = () => submitNewPassword();
+}
+
+async function doRegister() {
+    const username = document.getElementById('username').value.trim();
+    const password = document.getElementById('password').value;
+    const nickname = document.getElementById('nickname').value.trim();
+    const email = document.getElementById('register-email').value.trim();
+    const firstName = document.getElementById('first-name')?.value || '';
+    const lastName = document.getElementById('last-name')?.value || '';
+    const birthYear = document.getElementById('birth-year')?.value || null;
+
+    if (!username || !password) return alert('Заполните имя пользователя и пароль');
+    if (!nickname) return alert('Укажите никнейм');
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return alert('Укажите корректный email');
+
+    const resp = await fetch('/api/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            username, password, email, nickname,
+            first_name: firstName, last_name: lastName,
+            birth_year: birthYear ? parseInt(birthYear) : null
+        })
+    });
+    const data = await resp.json();
+    if (resp.ok) {
+        alert('Регистрация успешна! Теперь войдите.');
+        authMode = 'login';
+        document.getElementById('register-fields').style.display = 'none';
+        document.getElementById('show-register-fields').textContent = 'Регистрация';
+        document.getElementById('login-btn').textContent = 'Войти';
+    } else {
+        alert('Ошибка: ' + (data.detail || 'Неизвестная ошибка'));
+    }
+}
+
+async function doLogin() {
+    const username = document.getElementById('username').value;
+    const password = document.getElementById('password').value;
+    const resp = await fetch('/api/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password })
+    });
+    const data = await resp.json();
+    if (resp.ok) {
+        setToken(data.access_token);
+        localStorage.setItem('token', data.access_token);
+        await initApp();
+    } else {
+        alert('Ошибка входа: ' + (data.detail || 'Неверные данные'));
+    }
+}
+
+async function sendPasswordReset() {
+    const email = document.getElementById('forgot-email').value.trim();
+    if (!email) return alert('Введите email');
+    const resp = await fetch('/api/forgot_password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email })
+    });
+    if (resp.ok) {
+        alert('Если такой email зарегистрирован, мы отправили ссылку для сброса пароля.');
+        document.getElementById('forgot-password-form').style.display = 'none';
+        document.getElementById('forgot-email').value = '';
+    } else {
+        const data = await resp.json().catch(() => ({}));
+        alert('Ошибка: ' + (data.detail || 'Не удалось отправить'));
+    }
+}
+
+async function submitNewPassword() {
+    const resetForm = document.getElementById('reset-password-form');
+    const resetToken = resetForm.dataset.token;
+    const pwd = document.getElementById('reset-new-password').value;
+    const pwdConfirm = document.getElementById('reset-confirm-password').value;
+    if (!pwd || pwd.length < 6) return alert('Пароль должен быть не короче 6 символов');
+    if (pwd !== pwdConfirm) return alert('Пароли не совпадают');
+    const resp = await fetch('/api/reset_password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: resetToken, new_password: pwd })
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (resp.ok) {
+        alert('Пароль изменён! Войдите с новым паролем.');
+        const u = new URL(window.location.href);
+        u.searchParams.delete('reset_token');
+        window.location.href = u.toString();
+    } else {
+        alert('Ошибка: ' + (data.detail || 'Не удалось сменить пароль'));
+    }
+}
+
+function doLogout() {
+    localStorage.removeItem('token');
+    window.location.href = '/static/index.html?reload=' + Date.now();
+}
+
+window.auth = { register: doRegister, login: doLogin, logout: doLogout };
+setupAuthListeners();
+
+// ============ APP ============
+
+async function loadStateManager() {
+    if (!stateManager) stateManager = await import('./stateManager.js');
+    return stateManager;
+}
 async function loadTerminal() {
     if (!terminalModule) {
         terminalModule = await import('./terminal.js');
@@ -28,54 +182,9 @@ async function loadTerminal() {
     return terminalModule;
 }
 
-window.auth = {
-    register: async () => {
-        const username = document.getElementById('username').value;
-        const password = document.getElementById('password').value;
-        const nickname = document.getElementById('nickname').value.trim();
-        if (!nickname) {
-            alert('Пожалуйста, укажите отображаемое имя (никнейм)');
-            return;
-        }
-        const firstName = document.getElementById('first-name')?.value || '';
-        const lastName = document.getElementById('last-name')?.value || '';
-        const birthYear = document.getElementById('birth-year')?.value || null;
-        const resp = await fetch('/api/register', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ username, password, nickname, first_name: firstName, last_name: lastName, birth_year: birthYear })
-        });
-        const data = await resp.json();
-        if (resp.ok) alert('Регистрация успешна! Теперь войдите.');
-        else alert('Ошибка: ' + (data.detail || 'Неизвестная ошибка'));
-    },
-    login: async () => {
-        const username = document.getElementById('username').value;
-        const password = document.getElementById('password').value;
-        const resp = await fetch('/api/login', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ username, password })
-        });
-        const data = await resp.json();
-        if (resp.ok) {
-            setToken(data.access_token);
-            localStorage.setItem('token', data.access_token);
-            await initApp();
-        } else {
-            alert('Ошибка входа: ' + (data.detail || 'Неверные данные'));
-        }
-    },
-    logout: () => {
-        localStorage.removeItem('token');
-        window.location.href = '/static/index.html?reload=' + Date.now();
-    }
-};
-
 export async function initApp() {
     document.body.classList.remove('chat-open');
     setCurrentChatId(null);
-
     document.getElementById('login-form').style.display = 'none';
     document.getElementById('app').style.display = 'block';
 
@@ -84,8 +193,7 @@ export async function initApp() {
 
     let resizeTimeout;
     function setViewportHeight() {
-        const vh = window.innerHeight * 0.01;
-        document.documentElement.style.setProperty('--vh', `${vh}px`);
+        document.documentElement.style.setProperty('--vh', `${window.innerHeight * 0.01}px`);
     }
     setViewportHeight();
     window.addEventListener('resize', () => {
@@ -93,26 +201,38 @@ export async function initApp() {
         resizeTimeout = setTimeout(setViewportHeight, 100);
     });
 
+    setupEventListeners();
+
+    connectWebSocket();
+
     const chatsPromise = loadChats().catch(err => console.error('Chats error', err));
     const profilePromise = loadProfile().catch(err => console.error('Profile error', err));
     const vapidPromise = loadVapidPublicKey().catch(err => console.error('Vapid error', err));
-    connectWebSocket();
 
     await chatsPromise;
     if (loadingOverlay) loadingOverlay.style.display = 'none';
 
-    setupEventListeners();
+    await Promise.all([profilePromise, vapidPromise]);
 
-    Promise.all([profilePromise, vapidPromise]).then(() => {});
+    // Восстановить состояние
+    try {
+        const { loadState } = await loadStateManager();
+        const saved = loadState();
+        if (saved.theme) applyTheme(saved.theme);
+        if (saved.lastChatId) {
+            selectChat(saved.lastChatId).catch(() => {});
+        }
+    } catch (e) { console.error(e); }
 
     if ('serviceWorker' in navigator) {
-        requestIdleCallback(() => {
+        const idle = window.requestIdleCallback || (cb => setTimeout(cb, 1));
+        idle(() => {
             navigator.serviceWorker.register('/static/sw.js')
-                .then(async () => {
-                    await subscribeToPush();
-                    await updatePushStatus();
-                })
-                .catch(err => console.error('SW registration failed', err));
+            .then(async () => {
+                await subscribeToPush();
+                await updatePushStatus();
+            })
+            .catch(err => console.error('SW registration failed', err));
         });
     }
 }
@@ -121,24 +241,33 @@ async function loadProfile() {
     try {
         const resp = await fetch('/api/user/me', { headers: { 'Authorization': `Bearer ${token}` } });
         if (!await checkAuth(resp)) return;
-        if (resp.ok) {
-            const user = await resp.json();
-            const displayName = user.nickname || user.username;
-            document.getElementById('display-name').textContent = displayName;
-            const nicknameDisplay = document.getElementById('nickname-display');
-            if (user.nickname && user.nickname !== user.username) {
-                nicknameDisplay.textContent = `@${user.username}`;
-            } else {
-                nicknameDisplay.textContent = '';
-            }
-            updateAvatarDisplay(user.avatar_url);
-            setCurrentUserId(user.id);
-            if (document.getElementById('profile-nickname')) document.getElementById('profile-nickname').value = user.nickname || '';
-            if (document.getElementById('profile-first-name')) document.getElementById('profile-first-name').value = user.first_name || '';
-            if (document.getElementById('profile-last-name')) document.getElementById('profile-last-name').value = user.last_name || '';
-            if (document.getElementById('profile-birth-year')) document.getElementById('profile-birth-year').value = user.birth_year || '';
+        if (!resp.ok) return;
+        const user = await resp.json();
+        document.getElementById('display-name').textContent = user.nickname || user.username;
+        const nickEl = document.getElementById('nickname-display');
+        if (user.nickname && user.nickname !== user.username) {
+            nickEl.textContent = `@${user.username}`;
+        } else {
+            nickEl.textContent = '';
         }
-    } catch(e) { console.error(e); }
+        updateAvatarDisplay(user.avatar_url);
+        setCurrentUserId(user.id);
+        fillProfileForm(user);
+    } catch (e) { console.error(e); }
+}
+
+function fillProfileForm(user) {
+    const fields = {
+        'profile-email': user.email || '',
+        'profile-nickname': user.nickname || '',
+        'profile-first-name': user.first_name || '',
+        'profile-last-name': user.last_name || '',
+        'profile-birth-year': user.birth_year || ''
+    };
+    for (const [id, val] of Object.entries(fields)) {
+        const el = document.getElementById(id);
+        if (el) el.value = val;
+    }
 }
 
 async function loadVapidPublicKey() {
@@ -151,14 +280,33 @@ async function loadVapidPublicKey() {
     }
 }
 
+function updateAvatarDisplay(avatarUrl) {
+    const avatarIcon = document.getElementById('avatar-icon');
+    const avatarImg = document.getElementById('avatar-img');
+    const profileAvatarImg = document.getElementById('profile-avatar-img');
+    if (avatarUrl) {
+        avatarIcon.style.display = 'none';
+        avatarImg.style.display = 'block';
+        avatarImg.src = avatarUrl;
+        if (profileAvatarImg) profileAvatarImg.src = avatarUrl;
+    } else {
+        avatarIcon.style.display = 'block';
+        avatarImg.style.display = 'none';
+        if (profileAvatarImg) profileAvatarImg.src = '';
+    }
+}
+
 function setupEventListeners() {
     const sendBtn = document.getElementById('send-btn');
     if (sendBtn) sendBtn.onclick = sendMessageWithFiles;
 
     const messageText = document.getElementById('message-text');
     if (messageText) {
-        messageText.addEventListener('keypress', (e) => {
-            if (e.key === 'Enter') sendMessageWithFiles();
+        messageText.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.isComposing) {
+                e.preventDefault();
+                sendMessageWithFiles();
+            }
         });
     }
 
@@ -174,11 +322,13 @@ function setupEventListeners() {
     const settingsBtn = document.getElementById('settings-btn');
     if (settingsBtn) {
         settingsBtn.onclick = () => {
-            const modal = document.getElementById('settings-modal');
             const themeSelect = document.getElementById('theme-select');
             if (themeSelect) themeSelect.value = localStorage.getItem('theme') || 'light';
-            if (modal) modal.style.display = 'flex';
-            loadProfileForm();
+            document.getElementById('settings-modal').style.display = 'flex';
+            // Заполнить профиль заранее
+            fetch('/api/user/me', { headers: { 'Authorization': `Bearer ${token}` } })
+            .then(r => r.ok ? r.json() : null)
+            .then(u => { if (u) fillProfileForm(u); });
         };
     }
 
@@ -218,11 +368,13 @@ function setupEventListeners() {
         autoDownloadSelect.value = localStorage.getItem('auto_download') || 'always';
         autoDownloadSelect.onchange = (e) => localStorage.setItem('auto_download', e.target.value);
     }
+
     const imagePreviewSelect = document.getElementById('image-preview');
     if (imagePreviewSelect) {
         imagePreviewSelect.value = localStorage.getItem('image_preview') || 'always';
         imagePreviewSelect.onchange = (e) => localStorage.setItem('image_preview', e.target.value);
     }
+
     const markdownToggle = document.getElementById('markdown-toggle');
     if (markdownToggle) {
         markdownToggle.checked = localStorage.getItem('markdown') === 'true';
@@ -230,7 +382,7 @@ function setupEventListeners() {
     }
 
     const userSearch = document.getElementById('user-search');
-    if (userSearch) userSearch.oninput = searchUsers;
+    if (userSearch) userSearch.oninput = debounce(searchUsers, 300);
 
     const createGroupConfirm = document.getElementById('create-group-confirm');
     if (createGroupConfirm) createGroupConfirm.onclick = createGroup;
@@ -249,79 +401,68 @@ function setupEventListeners() {
     const searchMessagesBtn = document.getElementById('search-messages-btn');
     if (searchMessagesBtn) {
         searchMessagesBtn.onclick = () => {
-            const modal = document.getElementById('search-modal');
-            if (modal) modal.style.display = 'flex';
-            const searchQuery = document.getElementById('search-query');
-            if (searchQuery) searchQuery.value = '';
-            const resultsList = document.getElementById('search-results-list');
-            if (resultsList) resultsList.innerHTML = '';
+            document.getElementById('search-modal').style.display = 'flex';
+            document.getElementById('search-query').value = '';
+            document.getElementById('search-results-list').innerHTML = '';
         };
     }
 
     const searchInput = document.getElementById('search-query');
     if (searchInput) {
-        searchInput.addEventListener('input', (e) => {
+        searchInput.addEventListener('input', debounce(e => {
             if (e.target.value.length > 2) searchMessages(e.target.value);
-        });
+        }, 300));
     }
 
     const messagesArea = document.getElementById('messages-area');
-    let scrollTimeout = null;
     if (messagesArea) {
+        let scrollTimeout = null;
         messagesArea.addEventListener('contextmenu', (e) => {
             const msgDiv = e.target.closest('.message');
-            if (!msgDiv) return;
+            if (!msgDiv || msgDiv.dataset.deleted === '1') return;
             e.preventDefault();
             const contextMenu = document.getElementById('context-menu');
-            if (contextMenu) {
-                contextMenu.style.display = 'block';
-                let left = e.clientX;
-                let top = e.clientY;
-                const menuWidth = contextMenu.offsetWidth;
-                const menuHeight = contextMenu.offsetHeight;
-                if (left + menuWidth > window.innerWidth) left = window.innerWidth - menuWidth - 10;
-                if (top + menuHeight > window.innerHeight) top = window.innerHeight - menuHeight - 10;
-                contextMenu.style.left = left + 'px';
-                contextMenu.style.top = top + 'px';
-                contextMenu.dataset.msgId = msgDiv.dataset.msgId;
-            }
+            if (!contextMenu) return;
+            contextMenu.style.display = 'block';
+            let left = e.clientX, top = e.clientY;
+            const mw = contextMenu.offsetWidth, mh = contextMenu.offsetHeight;
+            if (left + mw > window.innerWidth) left = window.innerWidth - mw - 10;
+            if (top + mh > window.innerHeight) top = window.innerHeight - mh - 10;
+            contextMenu.style.left = left + 'px';
+            contextMenu.style.top = top + 'px';
+            contextMenu.dataset.msgId = msgDiv.dataset.msgId;
         });
         document.addEventListener('click', () => {
-            const contextMenu = document.getElementById('context-menu');
-            if (contextMenu) contextMenu.style.display = 'none';
+            const cm = document.getElementById('context-menu');
+            if (cm) cm.style.display = 'none';
         });
-
-        messagesArea.addEventListener('scroll', () => {
-            if (scrollTimeout) clearTimeout(scrollTimeout);
-            scrollTimeout = setTimeout(() => {
-                if (messagesArea.scrollTop <= 1 && !loadingMessages && hasMoreMessages) {
-                    loadMoreMessages();
-                }
-            }, 100);
-        });
+            messagesArea.addEventListener('scroll', () => {
+                if (scrollTimeout) clearTimeout(scrollTimeout);
+                scrollTimeout = setTimeout(() => {
+                    if (messagesArea.scrollTop <= 1 && !loadingMessages && hasMoreMessages) {
+                        loadMoreMessages();
+                    }
+                }, 100);
+            });
     }
 
     const contextMenu = document.getElementById('context-menu');
     if (contextMenu) {
         const editItem = contextMenu.querySelector('.context-edit');
-        if (editItem) {
-            editItem.onclick = () => {
-                const msgId = contextMenu.dataset.msgId;
-                const msgDiv = document.querySelector(`.message[data-msg-id="${msgId}"]`);
-                const oldText = msgDiv?.querySelector('.text')?.innerText;
-                const newText = prompt('Редактировать сообщение:', oldText);
-                if (newText) editMessage(msgId, newText);
-                contextMenu.style.display = 'none';
-            };
-        }
+        if (editItem) editItem.onclick = () => {
+            const msgId = contextMenu.dataset.msgId;
+            const msgDiv = document.querySelector(`.message[data-msg-id="${msgId}"]`);
+            const oldText = msgDiv?.querySelector('.text-body')?.innerText || '';
+            const newText = prompt('Редактировать сообщение:', oldText);
+            if (newText) editMessage(msgId, newText);
+            contextMenu.style.display = 'none';
+        };
         const deleteItem = contextMenu.querySelector('.context-delete');
-        if (deleteItem) {
-            deleteItem.onclick = () => {
-                const msgId = contextMenu.dataset.msgId;
-                if (confirm('Удалить сообщение?')) deleteMessage(msgId);
-                contextMenu.style.display = 'none';
-            };
-        }
+        if (deleteItem) deleteItem.onclick = () => {
+            const msgId = contextMenu.dataset.msgId;
+            if (confirm('Удалить сообщение?')) deleteMessage(msgId);
+            contextMenu.style.display = 'none';
+        };
     }
 
     const backBtn = document.getElementById('back-to-chats-btn');
@@ -331,18 +472,23 @@ function setupEventListeners() {
             setCurrentChatId(null);
             const inputArea = document.getElementById('message-input-area');
             if (inputArea) inputArea.style.display = 'none';
-            const chatTitle = document.getElementById('chat-title');
-            if (chatTitle) chatTitle.textContent = 'Выберите чат';
+            document.getElementById('chat-title').textContent = 'Выберите чат';
             const messagesArea = document.getElementById('messages-area');
-            if (messagesArea) messagesArea.innerHTML = '';
+            if (messagesArea) {
+                messagesArea.querySelectorAll('.message').forEach(m => m.audioCleanup?.());
+                messagesArea.innerHTML = '';
+            }
             document.querySelectorAll('.chat-item').forEach(el => el.classList.remove('active'));
-            const deleteBtn = document.getElementById('delete-chat-btn');
-            const searchBtn = document.getElementById('search-messages-btn');
-            if (deleteBtn) deleteBtn.style.display = 'none';
-            if (searchBtn) searchBtn.style.display = 'none';
-            loadStateManager().then(({ saveState }) => saveState({ lastChatId: null, scrollOffset: 0 }));
+            ['delete-chat-btn', 'search-messages-btn', 'export-chat-btn'].forEach(id => {
+                const el = document.getElementById(id);
+                if (el) el.style.display = 'none';
+            });
+                loadStateManager().then(({ saveState }) => saveState({ lastChatId: null, scrollOffset: 0 }));
         };
     }
+
+    const logoutBtn = document.getElementById('logout-btn');
+    if (logoutBtn) logoutBtn.onclick = doLogout;
 
     const terminalToggle = document.getElementById('terminal-toggle');
     if (terminalToggle) {
@@ -353,104 +499,96 @@ function setupEventListeners() {
     }
 
     const saveProfileBtn = document.getElementById('save-profile-btn');
-    if (saveProfileBtn) saveProfileBtn.onclick = saveProfile;
+    if (saveProfileBtn) saveProfileBtn.onclick = async () => {
+        const ok = await saveProfile();
+        if (ok) await loadProfile();
+    };
 
-    const timelineBtn = document.getElementById('timeline-btn');
-    if (timelineBtn) {
-        timelineBtn.onclick = async () => {
-            const modal = document.getElementById('timeline-modal');
-            if (modal) modal.style.display = 'flex';
-            const resp = await fetch('/api/connection_logs', { headers: { 'Authorization': `Bearer ${token}` } });
-            const logs = await resp.json();
-            const list = document.getElementById('timeline-list');
-            if (list) {
-                list.innerHTML = logs.map(log => `<div>${new Date(log.timestamp).toLocaleString()} - ${log.event_type} (${log.reason})</div>`).join('');
-            }
-        };
-    }
+        const timelineBtn = document.getElementById('timeline-btn');
+        if (timelineBtn) {
+            timelineBtn.onclick = async () => {
+                document.getElementById('timeline-modal').style.display = 'flex';
+                const resp = await fetch('/api/connection_logs', { headers: { 'Authorization': `Bearer ${token}` } });
+                if (!await checkAuth(resp)) return;
+                const logs = await resp.json();
+                document.getElementById('timeline-list').innerHTML = logs.map(
+                    log => `<div>${new Date(log.timestamp).toLocaleString()} — ${log.event_type} (${log.reason})</div>`
+                ).join('');
+            };
+        }
 
-    const exportChatBtn = document.getElementById('export-chat-btn');
-    if (exportChatBtn) {
-        exportChatBtn.onclick = async () => {
-            if (!currentChatId) return;
-            window.open(`/api/chat/${currentChatId}/export`, '_blank');
-        };
-    }
+        const exportChatBtn = document.getElementById('export-chat-btn');
+        if (exportChatBtn) {
+            exportChatBtn.onclick = async () => {
+                // currentChatId импортируется как значение на момент вызова — берём из модуля
+                const { currentChatId } = await import('./config.js');
+                if (!currentChatId) return;
+                const resp = await fetch(`/api/chat/${currentChatId}/export`, {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                if (!await checkAuth(resp)) return;
+                if (!resp.ok) { alert('Ошибка экспорта'); return; }
+                const blob = await resp.blob();
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `chat_${currentChatId}.pdf`;
+                a.click();
+                URL.revokeObjectURL(url);
+            };
+        }
 
-    const userAvatarClickable = document.getElementById('user-avatar-clickable');
-    const userNameClickable = document.getElementById('username-clickable');
-    if (userAvatarClickable) {
-        userAvatarClickable.onclick = () => {
-            const modal = document.getElementById('profile-modal');
-            if (modal) modal.style.display = 'flex';
-            loadProfileForm();
-        };
-    }
-    if (userNameClickable) {
-        userNameClickable.onclick = () => {
-            const modal = document.getElementById('profile-modal');
-            if (modal) modal.style.display = 'flex';
-            loadProfileForm();
-        };
-    }
+        const profileOpeners = ['user-avatar-clickable', 'username-clickable'];
+        profileOpeners.forEach(id => {
+            const el = document.getElementById(id);
+            if (el) el.onclick = async () => {
+                document.getElementById('profile-modal').style.display = 'flex';
+                await loadProfile();
+            };
+        });
 
-    const avatarUpload = document.getElementById('avatar-upload');
-    const uploadAvatarBtn = document.getElementById('upload-avatar-btn');
-    if (uploadAvatarBtn && avatarUpload) {
-        uploadAvatarBtn.onclick = async () => {
-            const file = avatarUpload.files[0];
-            if (!file) return;
-            const formData = new FormData();
-            formData.append('file', file);
-            const resp = await fetch('/api/upload_avatar', {
-                method: 'POST',
-                headers: { 'Authorization': `Bearer ${token}` },
-                body: formData
-            });
-            if (resp.ok) {
-                const data = await resp.json();
-                updateAvatarDisplay(data.avatar_url);
-                alert('Аватар обновлён');
-            } else {
-                alert('Ошибка загрузки');
-            }
-        };
-    }
+        const avatarUpload = document.getElementById('avatar-upload');
+        const uploadAvatarBtn = document.getElementById('upload-avatar-btn');
+        if (uploadAvatarBtn && avatarUpload) {
+            uploadAvatarBtn.onclick = async () => {
+                const file = avatarUpload.files[0];
+                if (!file) return;
+                const formData = new FormData();
+                formData.append('file', file);
+                const resp = await fetch('/api/upload_avatar', {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${token}` },
+                    body: formData
+                });
+                if (resp.ok) {
+                    const data = await resp.json();
+                    updateAvatarDisplay(data.avatar_url);
+                    alert('Аватар обновлён');
+                } else {
+                    alert('Ошибка загрузки');
+                }
+            };
+        }
 
-    const showRegisterBtn = document.getElementById('show-register-fields');
-    const registerFields = document.getElementById('register-fields');
-    const loginBtn = document.getElementById('login-btn');
-    if (showRegisterBtn && registerFields) {
-        showRegisterBtn.onclick = () => {
-            registerFields.style.display = registerFields.style.display === 'none' ? 'block' : 'none';
-            showRegisterBtn.textContent = registerFields.style.display === 'none' ? 'Регистрация' : 'Скрыть поля';
-        };
-    }
-    if (loginBtn) {
-        loginBtn.onclick = () => window.auth.login();
-    }
-}
-
-function updateAvatarDisplay(avatarUrl) {
-    const avatarIcon = document.getElementById('avatar-icon');
-    const avatarImg = document.getElementById('avatar-img');
-    const profileAvatarImg = document.getElementById('profile-avatar-img');
-    if (avatarUrl) {
-        avatarIcon.style.display = 'none';
-        avatarImg.style.display = 'block';
-        avatarImg.src = avatarUrl;
-        if (profileAvatarImg) profileAvatarImg.src = avatarUrl;
-    } else {
-        avatarIcon.style.display = 'block';
-        avatarImg.style.display = 'none';
-        if (profileAvatarImg) profileAvatarImg.src = '';
-    }
+        const importThemeBtn = document.getElementById('import-theme-btn');
+        const themeFile = document.getElementById('theme-file');
+        if (importThemeBtn && themeFile) {
+            importThemeBtn.onclick = () => {
+                const file = themeFile.files[0];
+                if (!file) return;
+                const reader = new FileReader();
+                reader.onload = () => importTheme(reader.result);
+                reader.readAsText(file);
+            };
+        }
 }
 
 window.onload = () => {
-    const savedToken = localStorage.getItem('token');
-    if (savedToken) {
-        setToken(savedToken);
+    const urlParams = new URLSearchParams(window.location.search);
+    if (urlParams.get('reset_token')) return; // показываем reset-форму
+    const saved = localStorage.getItem('token');
+    if (saved) {
+        setToken(saved);
         initApp();
     }
 };

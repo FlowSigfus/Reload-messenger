@@ -1,8 +1,7 @@
 import { token, currentChatId, currentUserId, setCurrentChatId } from './config.js';
 import { checkAuth } from './auth.js';
 import { sendWebSocketMessage } from './websocket.js';
-import { closeSidebar, setSendButtonLoading } from './ui.js';
-import { getImagePreviewSetting, isWiFi } from './ui.js';
+import { closeSidebar, setSendButtonLoading, getImagePreviewSetting, isWiFi } from './ui.js';
 
 export let hasMoreMessages = true;
 export let loadingMessages = false;
@@ -14,11 +13,11 @@ const messagesArea = document.getElementById('messages-area');
 const filePreviewDiv = document.getElementById('file-preview');
 const messageText = document.getElementById('message-text');
 
+const MAX_FILE_SIZE = 100 * 1024 * 1024;
+
 let audioPlayerModule = null;
 async function getAudioPlayer() {
-    if (!audioPlayerModule) {
-        audioPlayerModule = await import('./audioPlayer.js');
-    }
+    if (!audioPlayerModule) audioPlayerModule = await import('./audioPlayer.js');
     return audioPlayerModule;
 }
 
@@ -34,19 +33,21 @@ function getFileIcon(fileType, fileName) {
 }
 
 function getFileNameFromUrl(url) {
-    return decodeURIComponent(url.split('/').pop());
+    return decodeURIComponent(url.split('/').pop() || 'file');
+}
+
+function cleanupAudio(root) {
+    root.querySelectorAll('.message').forEach(m => m.audioCleanup?.());
 }
 
 export async function loadChats() {
     const resp = await fetch('/api/chats', { headers: { 'Authorization': `Bearer ${token}` } });
     if (!await checkAuth(resp)) return;
+    if (!resp.ok) return;
     const chats = await resp.json();
     const listDiv = document.getElementById('chats-list');
     const fragment = document.createDocumentFragment();
-    chats.forEach(chat => {
-        const el = createChatElement(chat);
-        fragment.appendChild(el);
-    });
+    for (const chat of chats) fragment.appendChild(createChatElement(chat));
     listDiv.innerHTML = '';
     listDiv.appendChild(fragment);
 }
@@ -57,21 +58,21 @@ function createChatElement(chat) {
     if (chat.id === currentChatId) div.classList.add('active');
     div.dataset.chatId = chat.id;
 
+    const nameStr = chat.is_group ? (chat.name || 'Группа') : (chat.other_user || '?');
     const avatar = document.createElement('div');
     avatar.className = 'chat-avatar';
-    avatar.textContent = (chat.is_group ? chat.name : chat.other_user).charAt(0).toUpperCase();
+    avatar.textContent = (nameStr.charAt(0) || '?').toUpperCase();
 
     const info = document.createElement('div');
     info.className = 'chat-info';
     const name = document.createElement('div');
     name.className = 'chat-name';
-    name.textContent = chat.is_group ? chat.name : `Чат с ${chat.other_user}`;
+    name.textContent = chat.is_group ? (chat.name || 'Группа') : `Чат с ${chat.other_user || '?'}`;
     const lastMsg = document.createElement('div');
     lastMsg.className = 'chat-last-message';
     lastMsg.textContent = chat.last_message || 'Нет сообщений';
     info.appendChild(name);
     info.appendChild(lastMsg);
-
     div.appendChild(avatar);
     div.appendChild(info);
 
@@ -88,159 +89,149 @@ function createChatElement(chat) {
 
 export function updateChatInList(chatId, lastMessage, hasUnread = false) {
     const chatItem = document.querySelector(`.chat-item[data-chat-id="${chatId}"]`);
-    if (chatItem) {
-        const lastMsgDiv = chatItem.querySelector('.chat-last-message');
-        lastMsgDiv.textContent = lastMessage;
-        if (hasUnread && chatId !== currentChatId) {
-            let unreadSpan = chatItem.querySelector('.chat-unread');
-            if (!unreadSpan) {
-                unreadSpan = document.createElement('span');
-                unreadSpan.className = 'chat-unread';
-                chatItem.appendChild(unreadSpan);
-            }
-            const current = parseInt(unreadSpan.textContent) || 0;
-            unreadSpan.textContent = current + 1;
+    if (!chatItem) {
+        loadChats();
+        return;
+    }
+    const lastMsgDiv = chatItem.querySelector('.chat-last-message');
+    if (lastMsgDiv) lastMsgDiv.textContent = lastMessage;
+    if (hasUnread && chatId !== currentChatId) {
+        let unreadSpan = chatItem.querySelector('.chat-unread');
+        if (!unreadSpan) {
+            unreadSpan = document.createElement('span');
+            unreadSpan.className = 'chat-unread';
+            unreadSpan.textContent = '0';
+            chatItem.appendChild(unreadSpan);
         }
+        const cur = parseInt(unreadSpan.textContent) || 0;
+        unreadSpan.textContent = cur + 1;
     }
 }
 
 export async function selectChat(chatId) {
     setCurrentChatId(chatId);
+    cleanupAudio(messagesArea);
     messagesArea.innerHTML = '';
     document.getElementById('message-input-area').style.display = 'flex';
     hasMoreMessages = true;
     loadingMessages = false;
     oldestMessageId = null;
 
-    await loadLatestMessages();
+    await loadLatestMessages(chatId);
+    if (currentChatId !== chatId) return;
+
+    markRead(chatId);
 
     document.querySelectorAll('.chat-item').forEach(el => el.classList.remove('active'));
     const activeChat = document.querySelector(`.chat-item[data-chat-id="${chatId}"]`);
-    if (activeChat) activeChat.classList.add('active');
-    const chatName = activeChat ? activeChat.querySelector('.chat-name').textContent : 'Чат';
-    document.getElementById('chat-title').textContent = chatName;
+    if (activeChat) {
+        activeChat.classList.add('active');
+        document.getElementById('chat-title').textContent = activeChat.querySelector('.chat-name').textContent;
+    } else {
+        document.getElementById('chat-title').textContent = 'Чат';
+    }
 
-    const deleteBtn = document.getElementById('delete-chat-btn');
-    const searchBtn = document.getElementById('search-messages-btn');
-    if (deleteBtn) deleteBtn.style.display = 'inline-block';
-    if (searchBtn) searchBtn.style.display = 'inline-block';
+    document.getElementById('delete-chat-btn').style.display = 'inline-block';
+    document.getElementById('search-messages-btn').style.display = 'inline-block';
+    document.getElementById('export-chat-btn').style.display = 'inline-block';
 
-    const isMobile = window.matchMedia('(max-width: 768px)').matches;
-    if (isMobile) {
+    if (window.matchMedia('(max-width: 768px)').matches) {
         document.body.classList.add('chat-open');
     } else {
         closeSidebar();
     }
 }
 
-export async function loadLatestMessages() {
-    if (!currentChatId || loadingMessages) return;
+export async function loadLatestMessages(expectedChatId = currentChatId) {
+    if (!expectedChatId || loadingMessages) return;
     loadingMessages = true;
     hasMoreMessages = true;
     oldestMessageId = null;
 
     try {
-        const isMobile = window.matchMedia('(max-width: 768px)').matches;
-        const limit = isMobile ? 10 : 20;
-        const url = `/api/messages/${currentChatId}?limit=${limit}`;
-        const resp = await fetch(url, { headers: { 'Authorization': `Bearer ${token}` } });
+        const limit = window.matchMedia('(max-width: 768px)').matches ? 10 : 20;
+        const resp = await fetch(`/api/messages/${expectedChatId}?limit=${limit}`, {
+            headers: { 'Authorization': `Bearer ${token}` }
+        });
         if (!await checkAuth(resp)) return;
+        if (currentChatId !== expectedChatId) return;
         const messages = await resp.json();
+        if (currentChatId !== expectedChatId) return;
 
-        if (messages.length === 0) {
-            hasMoreMessages = false;
-            loadingMessages = false;
-            return;
-        }
-
-        oldestMessageId = messages[0]?.id;
+        if (messages.length === 0) { hasMoreMessages = false; return; }
+        oldestMessageId = messages[0].id;
 
         const fragment = document.createDocumentFragment();
-        for (const msg of messages) {
-            const msgElement = await createMessageElement(msg);
-            fragment.appendChild(msgElement);
-        }
+        for (const msg of messages) fragment.appendChild(await createMessageElement(msg));
         messagesArea.appendChild(fragment);
 
-        requestAnimationFrame(() => {
-            messagesArea.scrollTop = messagesArea.scrollHeight;
-        });
-
+        requestAnimationFrame(() => { messagesArea.scrollTop = messagesArea.scrollHeight; });
         if (messages.length < limit) hasMoreMessages = false;
     } catch (e) {
-        console.error('Error loading latest messages:', e);
+        console.error('loadLatestMessages:', e);
     } finally {
         loadingMessages = false;
     }
 }
 
 export async function loadMoreMessages() {
-    if (!currentChatId || loadingMessages || !hasMoreMessages || !oldestMessageId) {
-        console.log('Cannot load more:', { currentChatId, loadingMessages, hasMoreMessages, oldestMessageId });
-        return;
-    }
+    if (!currentChatId || loadingMessages || !hasMoreMessages || !oldestMessageId) return;
     loadingMessages = true;
+    const expectedChatId = currentChatId;
 
     try {
-        let url = `/api/messages/${currentChatId}?limit=20&before=${oldestMessageId}`;
-        const resp = await fetch(url, { headers: { 'Authorization': `Bearer ${token}` } });
+        const resp = await fetch(`/api/messages/${expectedChatId}?limit=20&before=${oldestMessageId}`, {
+            headers: { 'Authorization': `Bearer ${token}` }
+        });
         if (!await checkAuth(resp)) return;
+        if (currentChatId !== expectedChatId) return;
         const messages = await resp.json();
+        if (currentChatId !== expectedChatId) return;
 
-        if (messages.length === 0) {
-            hasMoreMessages = false;
-            loadingMessages = false;
-            return;
-        }
+        if (messages.length === 0) { hasMoreMessages = false; return; }
 
-        const oldScrollHeight = messagesArea.scrollHeight;
-        const oldScrollTop = messagesArea.scrollTop;
-
+        const oldH = messagesArea.scrollHeight;
+        const oldT = messagesArea.scrollTop;
         const fragment = document.createDocumentFragment();
-        for (let i = messages.length - 1; i >= 0; i--) {
-            const msgElement = await createMessageElement(messages[i]);
-            fragment.appendChild(msgElement);
-        }
+        for (const msg of messages) fragment.appendChild(await createMessageElement(msg));
         messagesArea.insertBefore(fragment, messagesArea.firstChild);
+        oldestMessageId = messages[0].id;
 
-        oldestMessageId = messages[0]?.id;
-
-        if (oldestMessageId) {
-            const newScrollHeight = messagesArea.scrollHeight;
-            messagesArea.scrollTop = oldScrollTop + (newScrollHeight - oldScrollHeight);
-        }
-
+        const newH = messagesArea.scrollHeight;
+        messagesArea.scrollTop = oldT + (newH - oldH);
         if (messages.length < 20) hasMoreMessages = false;
     } catch (e) {
-        console.error('Error loading more messages:', e);
+        console.error('loadMoreMessages:', e);
     } finally {
         loadingMessages = false;
     }
 }
 
 export async function markRead(chatId) {
-    const resp = await fetch(`/api/mark_read/${chatId}`, { method: 'POST', headers: { 'Authorization': `Bearer ${token}` } });
+    const resp = await fetch(`/api/mark_read/${chatId}`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}` }
+    });
     await checkAuth(resp);
     const unreadSpan = document.querySelector(`.chat-item[data-chat-id="${chatId}"] .chat-unread`);
     if (unreadSpan) unreadSpan.remove();
 }
 
 async function createMessageElement(msg) {
-    if (msg.is_deleted) {
-        const div = document.createElement('div');
-        div.className = `message ${msg.user_id === currentUserId ? 'sent' : 'received'}`;
-        div.dataset.msgId = msg.id;
-        const content = document.createElement('div');
-        content.className = 'text';
-        content.setAttribute('dir', 'ltr');
-        content.innerHTML = '<em>Сообщение удалено</em>';
-        div.appendChild(content);
-        return div;
-    }
-
     const div = document.createElement('div');
     div.className = `message ${msg.user_id === currentUserId ? 'sent' : 'received'}`;
     div.dataset.msgId = msg.id;
+
+    if (msg.is_deleted) {
+        div.dataset.deleted = '1';
+        const content = document.createElement('div');
+        content.className = 'text';
+        const inner = document.createElement('em');
+        inner.textContent = 'Сообщение удалено';
+        content.appendChild(inner);
+        div.appendChild(content);
+        return div;
+    }
 
     if (msg.username && msg.user_id !== currentUserId) {
         const author = document.createElement('div');
@@ -251,98 +242,104 @@ async function createMessageElement(msg) {
 
     const content = document.createElement('div');
     content.className = 'text';
-    content.setAttribute('dir', 'ltr');
 
+    const textBody = document.createElement('div');
+    textBody.className = 'text-body';
+    textBody.setAttribute('dir', 'ltr');
     if (msg.text) {
-        const useMarkdown = localStorage.getItem('markdown') === 'true';
-        if (useMarkdown) {
-            const { marked } = await import('https://cdn.jsdelivr.net/npm/marked/lib/marked.esm.js');
-            content.innerHTML = marked.parse(msg.text);
+        if (localStorage.getItem('markdown') === 'true') {
+            try {
+                const { marked } = await import('https://cdn.jsdelivr.net/npm/marked/lib/marked.esm.js');
+                const dirty = marked.parse(msg.text);
+                textBody.innerHTML = window.DOMPurify ? window.DOMPurify.sanitize(dirty) : msg.text;
+            } catch {
+                textBody.textContent = msg.text;
+            }
         } else {
-            content.textContent = msg.text;
+            textBody.textContent = msg.text;
         }
     }
+    content.appendChild(textBody);
 
     if (msg.file_url) {
         const fileDiv = document.createElement('div');
         fileDiv.className = 'file';
-
         const fileName = getFileNameFromUrl(msg.file_url);
         const fileIcon = getFileIcon(msg.file_type, fileName);
 
         if (msg.file_type === 'image') {
-            const autoSetting = getImagePreviewSetting();
-            const shouldShowPreview = autoSetting === 'always' || (autoSetting === 'wifi' && isWiFi());
-            if (shouldShowPreview) {
+            const setting = getImagePreviewSetting();
+            const show = setting === 'always' || (setting === 'wifi' && isWiFi());
+            if (show) {
                 const img = document.createElement('img');
                 img.src = msg.file_url;
                 img.alt = fileName;
                 img.loading = 'lazy';
                 fileDiv.appendChild(img);
             } else {
-                const downloadLink = document.createElement('a');
-                downloadLink.href = msg.file_url;
-                downloadLink.download = fileName;
-                downloadLink.className = 'file-download-link';
-                downloadLink.innerHTML = `<i class="fas ${fileIcon}"></i> ${fileName} <i class="fas fa-download"></i>`;
-                fileDiv.appendChild(downloadLink);
+                fileDiv.appendChild(makeFileLink(msg.file_url, fileName, fileIcon));
             }
             const caption = document.createElement('div');
             caption.className = 'file-caption';
-            caption.innerHTML = `<i class="fas ${fileIcon}"></i> ${fileName}`;
+            const capIcon = document.createElement('i');
+            capIcon.className = `fas ${fileIcon}`;
+            caption.appendChild(capIcon);
+            caption.appendChild(document.createTextNode(' ' + fileName));
             fileDiv.appendChild(caption);
         } else if (msg.file_type === 'audio') {
             const { createAudioPlayer } = await getAudioPlayer();
-            const audioContainer = createAudioPlayer(msg.file_url, msg.id);
-            fileDiv.appendChild(audioContainer);
+            const player = createAudioPlayer(msg.file_url, msg.id);
+            fileDiv.appendChild(player);
             const caption = document.createElement('div');
             caption.className = 'file-caption';
-            caption.innerHTML = `<i class="fas ${fileIcon}"></i> ${fileName}`;
+            const capIcon = document.createElement('i');
+            capIcon.className = `fas ${fileIcon}`;
+            caption.appendChild(capIcon);
+            caption.appendChild(document.createTextNode(' ' + fileName));
             fileDiv.appendChild(caption);
-            div.audioCleanup = () => audioContainer.cleanup();
+            div.audioCleanup = () => player.cleanup();
         } else {
-            const downloadLink = document.createElement('a');
-            downloadLink.href = msg.file_url;
-            downloadLink.download = fileName;
-            downloadLink.className = 'file-download-link';
-            downloadLink.innerHTML = `<i class="fas ${fileIcon}"></i> ${fileName} <i class="fas fa-download"></i>`;
-            fileDiv.appendChild(downloadLink);
+            fileDiv.appendChild(makeFileLink(msg.file_url, fileName, fileIcon));
         }
         content.appendChild(fileDiv);
     }
 
     div.appendChild(content);
 
-    if (msg.user_id === currentUserId && !msg.is_deleted && window.innerWidth > 768) {
+    if (msg.user_id === currentUserId && window.innerWidth > 768) {
         const actions = document.createElement('div');
         actions.className = 'message-actions';
         const editBtn = document.createElement('button');
         editBtn.innerHTML = '<i class="fas fa-edit"></i>';
         editBtn.onclick = (e) => {
             e.stopPropagation();
-            const newText = prompt('Редактировать сообщение:', msg.text);
-            if (newText) editMessage(msg.id, newText);
+            const newText = prompt('Редактировать сообщение:', msg.text || '');
+            if (newText !== null && newText !== msg.text) editMessage(msg.id, newText);
         };
-        const deleteBtn = document.createElement('button');
-        deleteBtn.innerHTML = '<i class="fas fa-trash"></i>';
-        deleteBtn.onclick = (e) => {
-            e.stopPropagation();
-            if (confirm('Удалить сообщение?')) deleteMessage(msg.id);
-        };
-        actions.appendChild(editBtn);
-        actions.appendChild(deleteBtn);
-        div.appendChild(actions);
+            const delBtn = document.createElement('button');
+            delBtn.innerHTML = '<i class="fas fa-trash"></i>';
+            delBtn.onclick = (e) => {
+                e.stopPropagation();
+                if (confirm('Удалить сообщение?')) deleteMessage(msg.id);
+            };
+                actions.appendChild(editBtn);
+                actions.appendChild(delBtn);
+                div.appendChild(actions);
     }
 
     if (msg.edited_at) {
-        div.addEventListener('click', async (e) => {
-            if (e.target.closest('.message-actions')) return;
-            const resp = await fetch(`/api/message_history/${msg.id}`, { headers: { 'Authorization': `Bearer ${token}` } });
+        textBody.style.cursor = 'pointer';
+        textBody.title = 'Показать историю изменений';
+        textBody.addEventListener('click', async () => {
+            const resp = await fetch(`/api/message_history/${msg.id}`, {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            if (!resp.ok) return;
             const history = await resp.json();
             if (history.length) {
-                let historyText = 'История изменений:\n';
-                history.forEach(h => historyText += `${new Date(h.edited_at).toLocaleString()}: ${h.old_text}\n`);
-                alert(historyText);
+                let text = 'История изменений:\n';
+                history.forEach(h => { text += `${new Date(h.edited_at).toLocaleString()}: ${h.old_text}\n`; });
+                alert(text);
             }
         });
     }
@@ -350,14 +347,26 @@ async function createMessageElement(msg) {
     return div;
 }
 
-export async function displayMessage(msg, prepend = false) {
-    const msgElement = await createMessageElement(msg);
-    if (prepend) {
-        messagesArea.insertBefore(msgElement, messagesArea.firstChild);
-    } else {
-        messagesArea.appendChild(msgElement);
-        requestAnimationFrame(() => msgElement.scrollIntoView({ behavior: 'smooth' }));
-    }
+function makeFileLink(url, fileName, fileIcon) {
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = fileName;
+    a.className = 'file-download-link';
+    const icon = document.createElement('i');
+    icon.className = `fas ${fileIcon}`;
+    a.appendChild(icon);
+    a.appendChild(document.createTextNode(' ' + fileName + ' '));
+    const dl = document.createElement('i');
+    dl.className = 'fas fa-download';
+    a.appendChild(dl);
+    return a;
+}
+
+export async function displayMessage(msg) {
+    const el = await createMessageElement(msg);
+    const nearBottom = (messagesArea.scrollHeight - messagesArea.scrollTop - messagesArea.clientHeight) < 120;
+    messagesArea.appendChild(el);
+    if (nearBottom) requestAnimationFrame(() => { messagesArea.scrollTop = messagesArea.scrollHeight; });
 }
 
 export async function sendMessageWithFiles() {
@@ -375,8 +384,9 @@ export async function sendMessageWithFiles() {
             updateFilePreview();
         }
         if (text) {
-            sendWebSocketMessage({ type: 'message', chat_id: currentChatId, text });
-            messageText.value = '';
+            const ok = sendWebSocketMessage({ type: 'message', chat_id: currentChatId, text });
+            if (ok) messageText.value = '';
+            else alert('Нет соединения. Попробуйте ещё раз.');
         }
     } finally {
         isSending = false;
@@ -390,9 +400,14 @@ async function sendMultipleFiles(files) {
         formData.append('file', file);
         formData.append('token', token);
         const resp = await fetch('/api/upload', { method: 'POST', body: formData });
-        const data = await resp.json();
+        const data = await resp.json().catch(() => ({}));
         if (resp.ok) {
-            sendWebSocketMessage({ type: 'file', chat_id: currentChatId, file_url: data.file_url, file_type: data.file_type });
+            sendWebSocketMessage({
+                type: 'file',
+                chat_id: currentChatId,
+                file_url: data.file_url,
+                file_type: data.file_type
+            });
         }
         await new Promise(r => setTimeout(r, 200));
     }
@@ -400,10 +415,14 @@ async function sendMultipleFiles(files) {
 
 export function handleFileSelection(e) {
     const files = Array.from(e.target.files);
-    if (files.length) {
-        selectedFiles.push(...files);
-        updateFilePreview();
+    for (const file of files) {
+        if (file.size > MAX_FILE_SIZE) {
+            alert(`${file.name} больше 100 МБ`);
+            continue;
+        }
+        selectedFiles.push(file);
     }
+    updateFilePreview();
     e.target.value = '';
 }
 
@@ -438,46 +457,53 @@ export async function editMessage(msgId, newText) {
 }
 
 export async function deleteMessage(msgId) {
-    const msgElement = document.querySelector(`.message[data-msg-id="${msgId}"]`);
-    if (msgElement && msgElement.audioCleanup) {
-        msgElement.audioCleanup();
-    }
+    const el = document.querySelector(`.message[data-msg-id="${msgId}"]`);
+    el?.audioCleanup?.();
     sendWebSocketMessage({ type: 'delete', message_id: msgId });
 }
 
 export async function deleteChat() {
     if (!currentChatId) return;
     if (!confirm('Удалить этот чат? Все сообщения будут удалены.')) return;
-    const resp = await fetch(`/api/chat/${currentChatId}`, { method: 'DELETE', headers: { 'Authorization': `Bearer ${token}` } });
+    const resp = await fetch(`/api/chat/${currentChatId}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${token}` }
+    });
     if (resp.ok) {
+        cleanupAudio(messagesArea);
         setCurrentChatId(null);
         document.getElementById('message-input-area').style.display = 'none';
         document.getElementById('chat-title').textContent = 'Выберите чат';
         messagesArea.innerHTML = '';
         await loadChats();
-        document.getElementById('delete-chat-btn').style.display = 'none';
-        document.getElementById('search-messages-btn').style.display = 'none';
+        ['delete-chat-btn', 'search-messages-btn', 'export-chat-btn'].forEach(id => {
+            const el = document.getElementById(id);
+            if (el) el.style.display = 'none';
+        });
+    } else if (resp.status === 403) {
+        alert('Удалить группу может только её создатель');
     }
 }
 
 export async function searchMessages(query) {
     if (!currentChatId) return;
-    const resp = await fetch(`/api/messages/${currentChatId}/search?q=${encodeURIComponent(query)}`, {
-        headers: { 'Authorization': `Bearer ${token}` }
-    });
+    const resp = await fetch(
+        `/api/messages/${currentChatId}/search?q=${encodeURIComponent(query)}`,
+                             { headers: { 'Authorization': `Bearer ${token}` } }
+    );
     if (!await checkAuth(resp)) return;
     const results = await resp.json();
-    const resultsDiv = document.getElementById('search-results-list');
-    resultsDiv.innerHTML = '';
+    const list = document.getElementById('search-results-list');
+    list.innerHTML = '';
     results.forEach(msg => {
         const el = document.createElement('div');
         el.className = 'search-result-item';
         el.textContent = msg.text || '(медиа)';
         el.onclick = () => {
-            const msgElement = document.querySelector(`.message[data-msg-id="${msg.id}"]`);
-            if (msgElement) msgElement.scrollIntoView({ behavior: 'smooth' });
+            const target = document.querySelector(`.message[data-msg-id="${msg.id}"]`);
+            if (target) target.scrollIntoView({ behavior: 'smooth' });
             document.getElementById('search-modal').style.display = 'none';
         };
-        resultsDiv.appendChild(el);
+        list.appendChild(el);
     });
 }

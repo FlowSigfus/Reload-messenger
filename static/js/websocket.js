@@ -1,16 +1,22 @@
-import { token, currentChatId, WS_RECONNECT_MAX_ATTEMPTS, WS_RECONNECT_DELAY_BASE } from './config.js';
+import { token, currentChatId, currentUserId } from './config.js';
+import {
+    WS_RECONNECT_MAX_ATTEMPTS, WS_RECONNECT_DELAY_BASE
+} from './config.js';
 import { updateConnectionStatus } from './ui.js';
-import { displayMessage, updateChatInList, markRead } from './chat.js';
+import {
+    displayMessage, updateChatInList, markRead, loadChats, selectChat
+} from './chat.js';
 
 let wsInstance = null;
 let wsReconnectTimer = null;
 let wsReconnectAttempts = 0;
 let connectionTimeout = null;
+let heartbeatTimer = null;
+let everConnected = false;
 
 export function connectWebSocket() {
     if (wsInstance && wsInstance.readyState === WebSocket.OPEN) return;
     if (wsReconnectTimer) clearTimeout(wsReconnectTimer);
-    if (connectionTimeout) clearTimeout(connectionTimeout);
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}/ws/${token}`;
@@ -18,29 +24,36 @@ export function connectWebSocket() {
 
     connectionTimeout = setTimeout(() => {
         if (wsInstance && wsInstance.readyState !== WebSocket.OPEN) {
-            console.warn('WebSocket connection timeout, closing...');
+            console.warn('WS timeout, closing');
             wsInstance.close();
         }
     }, 5000);
 
-    wsInstance.onopen = () => {
-        console.log('✅ WebSocket connected');
-        if (connectionTimeout) clearTimeout(connectionTimeout);
+    wsInstance.onopen = async () => {
+        clearTimeout(connectionTimeout);
         updateConnectionStatus(true);
         wsReconnectAttempts = 0;
-        if (wsInstance.heartbeatInterval) clearInterval(wsInstance.heartbeatInterval);
-        wsInstance.heartbeatInterval = setInterval(() => {
-            if (wsInstance.readyState === WebSocket.OPEN) {
+        if (heartbeatTimer) clearInterval(heartbeatTimer);
+        heartbeatTimer = setInterval(() => {
+            if (wsInstance?.readyState === WebSocket.OPEN) {
                 wsInstance.send(JSON.stringify({ type: 'ping' }));
             }
         }, 30000);
+
+        if (everConnected) {
+            try {
+                await loadChats();
+                if (currentChatId) await selectChat(currentChatId);
+            } catch (e) { console.error('resync after reconnect:', e); }
+        }
+        everConnected = true;
     };
 
     wsInstance.onclose = (event) => {
-        console.log(`❌ WebSocket closed (${event.code})`, event.reason);
-        if (connectionTimeout) clearTimeout(connectionTimeout);
+        clearTimeout(connectionTimeout);
+        if (heartbeatTimer) clearInterval(heartbeatTimer);
         updateConnectionStatus(false);
-        clearInterval(wsInstance.heartbeatInterval);
+
         if (event.code === 1008 || event.code === 403) {
             localStorage.removeItem('token');
             alert('Сессия истекла. Войдите заново.');
@@ -56,33 +69,52 @@ export function connectWebSocket() {
         }
     };
 
-    wsInstance.onerror = (error) => {
-        console.error('WebSocket error:', error);
-    };
+    wsInstance.onerror = (e) => console.error('WS error:', e);
 
     wsInstance.onmessage = (event) => {
         try {
             const msg = JSON.parse(event.data);
             if (msg.type === 'pong') return;
+            if (msg.type === 'status') return;
+
             if (msg.type === 'edit') {
-                const msgDiv = document.querySelector(`.message[data-msg-id="${msg.message_id}"]`);
-                if (msgDiv) {
-                    const textDiv = msgDiv.querySelector('.text');
-                    if (textDiv) textDiv.innerHTML = msg.text;
+                const el = document.querySelector(`.message[data-msg-id="${msg.message_id}"]`);
+                if (el) {
+                    const body = el.querySelector('.text-body');
+                    if (body) body.textContent = msg.text;
                 }
                 return;
             }
             if (msg.type === 'delete') {
-                const msgDiv = document.querySelector(`.message[data-msg-id="${msg.message_id}"]`);
-                if (msgDiv) msgDiv.remove();
+                const el = document.querySelector(`.message[data-msg-id="${msg.message_id}"]`);
+                if (el) {
+                    el.audioCleanup?.();
+                    el.remove();
+                }
                 return;
             }
-            if (msg.type === 'status') return;
-            displayMessage(msg);
-            if (msg.chat_id === currentChatId) markRead(msg.chat_id);
-            updateChatInList(msg.chat_id, msg.text || 'Медиафайл', true);
+            if (msg.type === 'chat_deleted') {
+                const item = document.querySelector(`.chat-item[data-chat-id="${msg.chat_id}"]`);
+                if (item) item.remove();
+                if (currentChatId === msg.chat_id) {
+                    // закрыть текущий чат
+                    document.getElementById('messages-area').innerHTML = '';
+                    document.getElementById('message-input-area').style.display = 'none';
+                    document.getElementById('chat-title').textContent = 'Выберите чат';
+                }
+                return;
+            }
+
+            const preview = msg.text || 'Медиафайл';
+            if (msg.chat_id === currentChatId) {
+                displayMessage(msg);
+                markRead(msg.chat_id);
+                updateChatInList(msg.chat_id, preview, false);
+            } else {
+                updateChatInList(msg.chat_id, preview, msg.user_id !== currentUserId);
+            }
         } catch (e) {
-            console.error('Ошибка обработки сообщения WebSocket', e);
+            console.error('WS message parse:', e);
         }
     };
 }
@@ -90,5 +122,7 @@ export function connectWebSocket() {
 export function sendWebSocketMessage(data) {
     if (wsInstance && wsInstance.readyState === WebSocket.OPEN) {
         wsInstance.send(JSON.stringify(data));
+        return true;
     }
+    return false;
 }
