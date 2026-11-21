@@ -40,6 +40,12 @@ function cleanupAudio(root) {
     root.querySelectorAll('.message').forEach(m => m.audioCleanup?.());
 }
 
+// ---------- Дедупликация ----------
+function isMessageDisplayed(id) {
+    return !!messagesArea.querySelector(`.message[data-msg-id="${id}"]`);
+}
+
+// ---------- Список чатов ----------
 export async function loadChats() {
     const resp = await fetch('/api/chats', { headers: { 'Authorization': `Bearer ${token}` } });
     if (!await checkAuth(resp)) return;
@@ -108,6 +114,7 @@ export function updateChatInList(chatId, lastMessage, hasUnread = false) {
     }
 }
 
+// ---------- Выбор чата ----------
 export async function selectChat(chatId) {
     setCurrentChatId(chatId);
     cleanupAudio(messagesArea);
@@ -119,7 +126,6 @@ export async function selectChat(chatId) {
 
     await loadLatestMessages(chatId);
     if (currentChatId !== chatId) return;
-
     markRead(chatId);
 
     document.querySelectorAll('.chat-item').forEach(el => el.classList.remove('active'));
@@ -162,7 +168,10 @@ export async function loadLatestMessages(expectedChatId = currentChatId) {
         oldestMessageId = messages[0].id;
 
         const fragment = document.createDocumentFragment();
-        for (const msg of messages) fragment.appendChild(await createMessageElement(msg));
+        for (const msg of messages) {
+            if (isMessageDisplayed(msg.id)) continue;
+            fragment.appendChild(await createMessageElement(msg));
+        }
         messagesArea.appendChild(fragment);
 
         requestAnimationFrame(() => { messagesArea.scrollTop = messagesArea.scrollHeight; });
@@ -187,13 +196,15 @@ export async function loadMoreMessages() {
         if (currentChatId !== expectedChatId) return;
         const messages = await resp.json();
         if (currentChatId !== expectedChatId) return;
-
         if (messages.length === 0) { hasMoreMessages = false; return; }
 
         const oldH = messagesArea.scrollHeight;
         const oldT = messagesArea.scrollTop;
         const fragment = document.createDocumentFragment();
-        for (const msg of messages) fragment.appendChild(await createMessageElement(msg));
+        for (const msg of messages) {
+            if (isMessageDisplayed(msg.id)) continue;
+            fragment.appendChild(await createMessageElement(msg));
+        }
         messagesArea.insertBefore(fragment, messagesArea.firstChild);
         oldestMessageId = messages[0].id;
 
@@ -217,6 +228,7 @@ export async function markRead(chatId) {
     if (unreadSpan) unreadSpan.remove();
 }
 
+// ---------- Отрисовка сообщения ----------
 async function createMessageElement(msg) {
     const div = document.createElement('div');
     div.className = `message ${msg.user_id === currentUserId ? 'sent' : 'received'}`;
@@ -363,12 +375,14 @@ function makeFileLink(url, fileName, fileIcon) {
 }
 
 export async function displayMessage(msg) {
+    if (isMessageDisplayed(msg.id)) return;       // ← дедуп
     const el = await createMessageElement(msg);
     const nearBottom = (messagesArea.scrollHeight - messagesArea.scrollTop - messagesArea.clientHeight) < 120;
     messagesArea.appendChild(el);
     if (nearBottom) requestAnimationFrame(() => { messagesArea.scrollTop = messagesArea.scrollHeight; });
 }
 
+// ---------- Отправка ----------
 export async function sendMessageWithFiles() {
     if (isSending) return;
     const text = messageText.value.trim();

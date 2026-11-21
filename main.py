@@ -2,6 +2,7 @@ import os
 import shutil
 import uuid
 import secrets
+import re
 from datetime import datetime, timedelta
 from typing import List, Optional
 from collections import defaultdict
@@ -51,18 +52,15 @@ class UserCreate(BaseModel):
     username: str
     password: str
     email: EmailStr
-    first_name: Optional[str] = None
-    last_name: Optional[str] = None
-    nickname: Optional[str] = None
-    birth_year: Optional[int] = None
-
 
 class UserUpdate(BaseModel):
+    username: Optional[str] = None
     email: Optional[EmailStr] = None
     first_name: Optional[str] = None
     last_name: Optional[str] = None
-    nickname: Optional[str] = None
     birth_year: Optional[int] = None
+
+USERNAME_RE = re.compile(r'^[a-zA-Z0-9_]{3,32}$')
 
 
 class UserLogin(BaseModel):
@@ -143,23 +141,20 @@ async def get_current_user(
 # ---------- Auth ----------
 @app.post("/api/register")
 def register(user: UserCreate, db: Session = Depends(get_db)):
+    if not USERNAME_RE.match(user.username):
+        raise HTTPException(400, "Username: 3-32 chars, letters/digits/_ only")
+    if len(user.password) < 8:
+        raise HTTPException(400, "Password must be at least 8 characters")
     if db.query(User).filter(User.username == user.username).first():
         raise HTTPException(400, "Username already exists")
-    if user.nickname and db.query(User).filter(User.nickname == user.nickname).first():
-        raise HTTPException(400, "Nickname already exists")
     if db.query(User).filter(User.email == user.email).first():
         raise HTTPException(400, "Email already registered")
 
-    new_user = User(
+    db.add(User(
         username=user.username,
         password_hash=get_password_hash(user.password),
-        email=user.email,
-        first_name=user.first_name,
-        last_name=user.last_name,
-        nickname=user.nickname,
-        birth_year=user.birth_year
-    )
-    db.add(new_user)
+        email=user.email
+    ))
     db.commit()
     return {"message": "User created"}
 
@@ -221,7 +216,6 @@ def get_me(current_user: User = Depends(get_current_user)):
         "email": current_user.email,
         "first_name": current_user.first_name,
         "last_name": current_user.last_name,
-        "nickname": current_user.nickname,
         "birth_year": current_user.birth_year,
         "created_at": current_user.created_at.isoformat(),
         "avatar_url": current_user.avatar_url
@@ -236,17 +230,20 @@ def update_me(
 ):
     data = update.dict(exclude_unset=True)
 
-    if "nickname" in data and data["nickname"] == "":
-        data["nickname"] = None
-    if data.get("nickname"):
-        if db.query(User).filter(User.nickname == data["nickname"], User.id != current_user.id).first():
-            raise HTTPException(400, "Nickname already taken")
-    if data.get("email"):
-        if db.query(User).filter(User.email == data["email"], User.id != current_user.id).first():
+    if 'username' in data:
+        new_username = (data['username'] or '').strip()
+        if not USERNAME_RE.match(new_username):
+            raise HTTPException(400, "Username: 3-32 chars, letters/digits/_ only")
+        if db.query(User).filter(User.username == new_username, User.id != current_user.id).first():
+            raise HTTPException(400, "Username already taken")
+        data['username'] = new_username
+
+    if data.get('email'):
+        if db.query(User).filter(User.email == data['email'], User.id != current_user.id).first():
             raise HTTPException(400, "Email already in use")
 
-    for key, value in data.items():
-        setattr(current_user, key, value)
+    for k, v in data.items():
+        setattr(current_user, k, v)
     db.commit()
     return {"message": "Profile updated"}
 

@@ -6,12 +6,12 @@ import {
     loadMoreMessages, hasMoreMessages, loadingMessages, deleteChat,
     searchMessages, editMessage, deleteMessage
 } from './chat.js';
-import { updatePushStatus, applyTheme, toggleSidebar, closeSidebar, loadProfileForm, saveProfile, importTheme } from './ui.js';
+import { updatePushStatus, applyTheme, toggleSidebar, closeSidebar, saveProfile, importTheme } from './ui.js';
 import { subscribeToPush } from './push.js';
 import { openGroupModal, searchUsers, createGroup } from './groups.js';
 import { toggleRecording } from './voice.js';
 
-let stateManager, terminalModule;
+let stateManager;
 let authMode = 'login';
 
 function debounce(fn, ms) {
@@ -19,8 +19,7 @@ function debounce(fn, ms) {
     return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
 }
 
-// ============ AUTH ============
-
+// ---------- AUTH ----------
 function setupAuthListeners() {
     const showRegisterBtn = document.getElementById('show-register-fields');
     const registerFields = document.getElementById('register-fields');
@@ -70,24 +69,20 @@ function setupAuthListeners() {
 async function doRegister() {
     const username = document.getElementById('username').value.trim();
     const password = document.getElementById('password').value;
-    const nickname = document.getElementById('nickname').value.trim();
     const email = document.getElementById('register-email').value.trim();
-    const firstName = document.getElementById('first-name')?.value || '';
-    const lastName = document.getElementById('last-name')?.value || '';
-    const birthYear = document.getElementById('birth-year')?.value || null;
 
-    if (!username || !password) return alert('Заполните имя пользователя и пароль');
-    if (!nickname) return alert('Укажите никнейм');
-    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return alert('Укажите корректный email');
+    if (!/^[a-zA-Z0-9_]{3,32}$/.test(username)) {
+        return alert('Имя: 3–32 символа, только латиница, цифры и _');
+    }
+    if (password.length < 8) return alert('Пароль минимум 8 символов');
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        return alert('Укажите корректный email');
+    }
 
     const resp = await fetch('/api/register', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            username, password, email, nickname,
-            first_name: firstName, last_name: lastName,
-            birth_year: birthYear ? parseInt(birthYear) : null
-        })
+        body: JSON.stringify({ username, password, email })
     });
     const data = await resp.json();
     if (resp.ok) {
@@ -142,7 +137,7 @@ async function submitNewPassword() {
     const resetToken = resetForm.dataset.token;
     const pwd = document.getElementById('reset-new-password').value;
     const pwdConfirm = document.getElementById('reset-confirm-password').value;
-    if (!pwd || pwd.length < 6) return alert('Пароль должен быть не короче 6 символов');
+    if (!pwd || pwd.length < 8) return alert('Пароль должен быть не короче 8 символов');
     if (pwd !== pwdConfirm) return alert('Пароли не совпадают');
     const resp = await fetch('/api/reset_password', {
         method: 'POST',
@@ -168,18 +163,10 @@ function doLogout() {
 window.auth = { register: doRegister, login: doLogin, logout: doLogout };
 setupAuthListeners();
 
-// ============ APP ============
-
+// ---------- APP ----------
 async function loadStateManager() {
     if (!stateManager) stateManager = await import('./stateManager.js');
     return stateManager;
-}
-async function loadTerminal() {
-    if (!terminalModule) {
-        terminalModule = await import('./terminal.js');
-        terminalModule.initTerminal();
-    }
-    return terminalModule;
 }
 
 export async function initApp() {
@@ -202,7 +189,6 @@ export async function initApp() {
     });
 
     setupEventListeners();
-
     connectWebSocket();
 
     const chatsPromise = loadChats().catch(err => console.error('Chats error', err));
@@ -214,14 +200,11 @@ export async function initApp() {
 
     await Promise.all([profilePromise, vapidPromise]);
 
-    // Восстановить состояние
     try {
         const { loadState } = await loadStateManager();
         const saved = loadState();
         if (saved.theme) applyTheme(saved.theme);
-        if (saved.lastChatId) {
-            selectChat(saved.lastChatId).catch(() => {});
-        }
+        if (saved.lastChatId) selectChat(saved.lastChatId).catch(() => {});
     } catch (e) { console.error(e); }
 
     if ('serviceWorker' in navigator) {
@@ -243,13 +226,8 @@ async function loadProfile() {
         if (!await checkAuth(resp)) return;
         if (!resp.ok) return;
         const user = await resp.json();
-        document.getElementById('display-name').textContent = user.nickname || user.username;
-        const nickEl = document.getElementById('nickname-display');
-        if (user.nickname && user.nickname !== user.username) {
-            nickEl.textContent = `@${user.username}`;
-        } else {
-            nickEl.textContent = '';
-        }
+        document.getElementById('display-name').textContent = user.username;
+        document.getElementById('nickname-display').textContent = `@${user.username}`;
         updateAvatarDisplay(user.avatar_url);
         setCurrentUserId(user.id);
         fillProfileForm(user);
@@ -258,8 +236,8 @@ async function loadProfile() {
 
 function fillProfileForm(user) {
     const fields = {
+        'profile-username': user.username || '',
         'profile-email': user.email || '',
-        'profile-nickname': user.nickname || '',
         'profile-first-name': user.first_name || '',
         'profile-last-name': user.last_name || '',
         'profile-birth-year': user.birth_year || ''
@@ -325,7 +303,6 @@ function setupEventListeners() {
             const themeSelect = document.getElementById('theme-select');
             if (themeSelect) themeSelect.value = localStorage.getItem('theme') || 'light';
             document.getElementById('settings-modal').style.display = 'flex';
-            // Заполнить профиль заранее
             fetch('/api/user/me', { headers: { 'Authorization': `Bearer ${token}` } })
             .then(r => r.ok ? r.json() : null)
             .then(u => { if (u) fillProfileForm(u); });
@@ -490,14 +467,6 @@ function setupEventListeners() {
     const logoutBtn = document.getElementById('logout-btn');
     if (logoutBtn) logoutBtn.onclick = doLogout;
 
-    const terminalToggle = document.getElementById('terminal-toggle');
-    if (terminalToggle) {
-        terminalToggle.onclick = async () => {
-            await loadTerminal();
-            window.toggleTerminal();
-        };
-    }
-
     const saveProfileBtn = document.getElementById('save-profile-btn');
     if (saveProfileBtn) saveProfileBtn.onclick = async () => {
         const ok = await saveProfile();
@@ -520,7 +489,6 @@ function setupEventListeners() {
         const exportChatBtn = document.getElementById('export-chat-btn');
         if (exportChatBtn) {
             exportChatBtn.onclick = async () => {
-                // currentChatId импортируется как значение на момент вызова — берём из модуля
                 const { currentChatId } = await import('./config.js');
                 if (!currentChatId) return;
                 const resp = await fetch(`/api/chat/${currentChatId}/export`, {
@@ -538,8 +506,7 @@ function setupEventListeners() {
             };
         }
 
-        const profileOpeners = ['user-avatar-clickable', 'username-clickable'];
-        profileOpeners.forEach(id => {
+        ['user-avatar-clickable', 'username-clickable'].forEach(id => {
             const el = document.getElementById(id);
             if (el) el.onclick = async () => {
                 document.getElementById('profile-modal').style.display = 'flex';
@@ -585,7 +552,7 @@ function setupEventListeners() {
 
 window.onload = () => {
     const urlParams = new URLSearchParams(window.location.search);
-    if (urlParams.get('reset_token')) return; // показываем reset-форму
+    if (urlParams.get('reset_token')) return;
     const saved = localStorage.getItem('token');
     if (saved) {
         setToken(saved);

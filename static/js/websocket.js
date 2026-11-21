@@ -1,11 +1,6 @@
-import { token, currentChatId, currentUserId } from './config.js';
-import {
-    WS_RECONNECT_MAX_ATTEMPTS, WS_RECONNECT_DELAY_BASE
-} from './config.js';
+import { token, currentChatId, currentUserId, WS_RECONNECT_MAX_ATTEMPTS, WS_RECONNECT_DELAY_BASE } from './config.js';
 import { updateConnectionStatus } from './ui.js';
-import {
-    displayMessage, updateChatInList, markRead, loadChats, selectChat
-} from './chat.js';
+import { displayMessage, updateChatInList, markRead, loadChats, selectChat } from './chat.js';
 
 let wsInstance = null;
 let wsReconnectTimer = null;
@@ -15,7 +10,8 @@ let heartbeatTimer = null;
 let everConnected = false;
 
 export function connectWebSocket() {
-    if (wsInstance && wsInstance.readyState === WebSocket.OPEN) return;
+    if (wsInstance && (wsInstance.readyState === WebSocket.OPEN
+        || wsInstance.readyState === WebSocket.CONNECTING)) return;
     if (wsReconnectTimer) clearTimeout(wsReconnectTimer);
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -74,8 +70,7 @@ export function connectWebSocket() {
     wsInstance.onmessage = (event) => {
         try {
             const msg = JSON.parse(event.data);
-            if (msg.type === 'pong') return;
-            if (msg.type === 'status') return;
+            if (msg.type === 'pong' || msg.type === 'status') return;
 
             if (msg.type === 'edit') {
                 const el = document.querySelector(`.message[data-msg-id="${msg.message_id}"]`);
@@ -97,7 +92,6 @@ export function connectWebSocket() {
                 const item = document.querySelector(`.chat-item[data-chat-id="${msg.chat_id}"]`);
                 if (item) item.remove();
                 if (currentChatId === msg.chat_id) {
-                    // закрыть текущий чат
                     document.getElementById('messages-area').innerHTML = '';
                     document.getElementById('message-input-area').style.display = 'none';
                     document.getElementById('chat-title').textContent = 'Выберите чат';
@@ -107,7 +101,7 @@ export function connectWebSocket() {
 
             const preview = msg.text || 'Медиафайл';
             if (msg.chat_id === currentChatId) {
-                displayMessage(msg);
+                displayMessage(msg);              // displayMessage уже дедуплицирует
                 markRead(msg.chat_id);
                 updateChatInList(msg.chat_id, preview, false);
             } else {

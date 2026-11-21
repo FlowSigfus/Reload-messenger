@@ -87,27 +87,26 @@ export function isWiFi() {
     return true;
 }
 
-export function loadProfileForm() {}
-
 export async function saveProfile() {
-    let nickname = document.getElementById('profile-nickname').value.trim();
-    if (nickname === '') nickname = null;
+    const username = document.getElementById('profile-username').value.trim();
     const email = document.getElementById('profile-email').value.trim() || null;
     const firstName = document.getElementById('profile-first-name').value;
     const lastName = document.getElementById('profile-last-name').value;
     const birthYear = document.getElementById('profile-birth-year').value;
 
+    if (!/^[a-zA-Z0-9_]{3,32}$/.test(username)) {
+        alert('Имя: 3–32 символа, только латиница, цифры и _');
+        return false;
+    }
+
     const resp = await fetch('/api/user/me', {
         method: 'PUT',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${token}`
-        },
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
         body: JSON.stringify({
+            username,
+            email,
             first_name: firstName,
             last_name: lastName,
-            nickname,
-            email,
             birth_year: birthYear ? parseInt(birthYear) : null
         })
     });

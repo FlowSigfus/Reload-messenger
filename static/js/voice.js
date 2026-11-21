@@ -8,6 +8,14 @@ let recordingStartTime = null;
 let recordingTimer = null;
 
 export async function toggleRecording() {
+    if (!navigator.mediaDevices?.getUserMedia) {
+        alert(
+            'Микрофон недоступен: нужен HTTPS.\n' +
+            'Для локальной сети — настрой mkcert на сервере.\n' +
+            'Для интернета — домен + SSL.'
+        );
+        return;
+    }
     if (isRecording) stopRecording();
     else startRecording();
 }
