@@ -836,8 +836,14 @@ app.add_middleware(GZipMiddleware, minimum_size=500)
 class CacheControlMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
         response = await call_next(request)
-        if request.url.path.startswith('/static/'):
-            response.headers['Cache-Control'] = 'public, max-age=31536000, immutable'
+        path = request.url.path
+        if path.startswith('/static/'):
+            if path.endswith(('.js', '.css', '.html')) or path.endswith('/'):
+                # Код меняется при каждом деплое — не кэшируем
+                response.headers['Cache-Control'] = 'no-cache, must-revalidate'
+            else:
+                # Картинки, шрифты — можно кэшировать
+                response.headers['Cache-Control'] = 'public, max-age=86400'
         return response
 
 
