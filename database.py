@@ -1,6 +1,9 @@
 import os
 from datetime import datetime
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, ForeignKey, Boolean, Text, Index, inspect, text
+from sqlalchemy import (
+    create_engine, Column, Integer, String, DateTime, ForeignKey,
+    Boolean, Text, Index, inspect, text
+)
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from dotenv import load_dotenv
@@ -38,6 +41,7 @@ class Chat(Base):
     name = Column(String(100), nullable=True)
     is_group = Column(Boolean, default=False)
     owner_id = Column(Integer, ForeignKey('users.id'), nullable=True)
+    avatar_url = Column(String(200), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     members = relationship('ChatMember', back_populates='chat')
@@ -128,7 +132,7 @@ Base.metadata.create_all(engine)
 
 
 def ensure_columns():
-    """Добавляет новые колонки в существующие таблицы (SQLite не умеет ALTER через ORM)."""
+    """Добавляет новые колонки в существующие таблицы."""
     inspector = inspect(engine)
     with engine.begin() as conn:
         try:
@@ -145,6 +149,9 @@ def ensure_columns():
             if 'owner_id' not in chat_cols:
                 conn.execute(text("ALTER TABLE chats ADD COLUMN owner_id INTEGER"))
                 print("✅ Migrated: chats.owner_id")
+            if 'avatar_url' not in chat_cols:
+                conn.execute(text("ALTER TABLE chats ADD COLUMN avatar_url VARCHAR(200)"))
+                print("✅ Migrated: chats.avatar_url")
 
             member_cols = {c['name'] for c in inspector.get_columns('chat_members')}
             if 'role' not in member_cols:

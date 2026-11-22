@@ -1,8 +1,8 @@
 import os
+import re
 import shutil
 import uuid
 import secrets
-import re
 from datetime import datetime, timedelta
 from typing import List, Optional
 from collections import defaultdict
@@ -17,6 +17,7 @@ from fastapi.responses import FileResponse, RedirectResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import or_, select
 from pydantic import BaseModel, EmailStr
+from starlette.background import BackgroundTask
 
 from database import (
     SessionLocal, User, Chat, ChatMember, Message, MessageRead,
@@ -41,17 +42,20 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(EXPORT_DIR, exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 
+USERNAME_RE = re.compile(r'^[a-zA-Z0-9_]{3,32}$')
+
 
 @app.get("/")
 async def root():
     return RedirectResponse(url="/static/index.html")
 
 
-# ---------- Pydantic модели ----------
+# ---------- Pydantic ----------
 class UserCreate(BaseModel):
     username: str
     password: str
     email: EmailStr
+
 
 class UserUpdate(BaseModel):
     username: Optional[str] = None
@@ -59,8 +63,6 @@ class UserUpdate(BaseModel):
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     birth_year: Optional[int] = None
-
-USERNAME_RE = re.compile(r'^[a-zA-Z0-9_]{3,32}$')
 
 
 class UserLogin(BaseModel):
@@ -70,10 +72,12 @@ class UserLogin(BaseModel):
 
 class ChatOut(BaseModel):
     id: int
-    name: Optional[str]
-    is_group: bool
-    other_user: Optional[str]
-    last_message: Optional[str]
+    name: Optional[str] = None
+    is_group: bool = False
+    avatar_url: Optional[str] = None
+    is_owner: bool = False
+    other_user: Optional[str] = None
+    last_message: Optional[str] = None
     unread_count: int = 0
 
 
@@ -81,16 +85,16 @@ class MessageOut(BaseModel):
     id: int
     user_id: int
     username: str
-    text: Optional[str]
-    file_url: Optional[str]
-    file_type: Optional[str]
+    text: Optional[str] = None
+    file_url: Optional[str] = None
+    file_type: Optional[str] = None
     created_at: str
     edited_at: Optional[str] = None
     is_deleted: bool = False
 
 
 class GroupCreate(BaseModel):
-    name: str
+    name: Optional[str] = None
     member_usernames: List[str]
 
 
@@ -128,8 +132,7 @@ async def get_current_user(
 ):
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(401, "Invalid or missing token")
-    token_str = authorization[7:]
-    payload = decode_token(token_str)
+    payload = decode_token(authorization[7:])
     if not payload:
         raise HTTPException(401, "Invalid or expired token")
     user = db.query(User).get(int(payload["sub"]))
@@ -164,8 +167,7 @@ def login(user: UserLogin, db: Session = Depends(get_db)):
     db_user = db.query(User).filter(User.username == user.username).first()
     if not db_user or not verify_password(user.password, db_user.password_hash):
         raise HTTPException(401, "Invalid credentials")
-    token = create_access_token({"sub": str(db_user.id)})
-    return {"access_token": token, "token_type": "bearer"}
+    return {"access_token": create_access_token({"sub": str(db_user.id)}), "token_type": "bearer"}
 
 
 @app.post("/api/forgot_password")
@@ -184,7 +186,6 @@ def forgot_password(data: ForgotPasswordIn, db: Session = Depends(get_db)):
         ))
         db.commit()
         send_password_reset_email(user.email, token)
-    # Одинаковый ответ всегда — чтобы не палить наличие email
     return {"message": "If this email is registered, a reset link has been sent"}
 
 
@@ -197,8 +198,8 @@ def reset_password(data: ResetPasswordIn, db: Session = Depends(get_db)):
     ).first()
     if not reset:
         raise HTTPException(400, "Invalid or expired token")
-    if len(data.new_password) < 6:
-        raise HTTPException(400, "Password must be at least 6 characters")
+    if len(data.new_password) < 8:
+        raise HTTPException(400, "Password must be at least 8 characters")
     user = db.query(User).get(reset.user_id)
     if not user:
         raise HTTPException(404, "User not found")
@@ -254,15 +255,16 @@ async def upload_avatar(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    ext = os.path.splitext(file.filename)[1]
+    ext = os.path.splitext(file.filename)[1] or '.png'
     filename = f"avatar_{current_user.id}_{uuid.uuid4().hex}{ext}"
     filepath = os.path.join(UPLOAD_DIR, filename)
     with open(filepath, "wb") as f:
         shutil.copyfileobj(file.file, f)
     if current_user.avatar_url:
-        old_path = os.path.join(UPLOAD_DIR, os.path.basename(current_user.avatar_url))
-        if os.path.exists(old_path):
-            os.remove(old_path)
+        old = os.path.join(UPLOAD_DIR, os.path.basename(current_user.avatar_url))
+        if os.path.exists(old):
+            try: os.remove(old)
+            except: pass
     current_user.avatar_url = f"/uploads/{filename}"
     db.commit()
     return {"avatar_url": current_user.avatar_url}
@@ -274,9 +276,15 @@ def get_chats(current_user: User = Depends(get_current_user), db: Session = Depe
     chats = db.query(Chat).join(ChatMember).filter(ChatMember.user_id == current_user.id).all()
     result = []
     for chat in chats:
-        chat_out = ChatOut(
-            id=chat.id, name=chat.name, is_group=chat.is_group,
-            other_user=None, last_message=None, unread_count=0
+        out = ChatOut(
+            id=chat.id,
+            name=chat.name,
+            is_group=chat.is_group,
+            avatar_url=chat.avatar_url,
+            is_owner=(chat.owner_id == current_user.id),
+            other_user=None,
+            last_message=None,
+            unread_count=0
         )
         if not chat.is_group:
             other_member = db.query(ChatMember).filter(
@@ -286,22 +294,22 @@ def get_chats(current_user: User = Depends(get_current_user), db: Session = Depe
             if other_member:
                 other_user = db.query(User).get(other_member.user_id)
                 if other_user:
-                    chat_out.other_user = other_user.username
+                    out.other_user = other_user.username
 
         last_msg = db.query(Message).filter(
             Message.chat_id == chat.id,
             Message.is_deleted == False
         ).order_by(Message.created_at.desc()).first()
-        chat_out.last_message = last_msg.text if last_msg and last_msg.text else ("Медиафайл" if last_msg else None)
+        if last_msg:
+            out.last_message = last_msg.text or "Медиафайл"
 
-        unread = db.query(MessageRead).join(Message).filter(
+        out.unread_count = db.query(MessageRead).join(Message).filter(
             Message.chat_id == chat.id,
             Message.is_deleted == False,
             MessageRead.user_id == current_user.id,
             MessageRead.read_at.is_(None)
         ).count()
-        chat_out.unread_count = unread
-        result.append(chat_out)
+        result.append(out)
     return result
 
 
@@ -349,6 +357,9 @@ def create_group(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
+    if not group.member_usernames:
+        raise HTTPException(400, "Select at least one member")
+
     members = []
     for username in group.member_usernames:
         user = db.query(User).filter(User.username == username).first()
@@ -358,14 +369,44 @@ def create_group(
     if current_user not in members:
         members.append(current_user)
 
-    chat = Chat(name=group.name, is_group=True, owner_id=current_user.id)
+    # 1-on-1 → обычный чат
+    if len(members) == 2:
+        other = next(m for m in members if m.id != current_user.id)
+        subq = db.query(ChatMember.chat_id).filter(
+            ChatMember.user_id == current_user.id
+        ).subquery()
+        existing_ids = [c[0] for c in db.query(ChatMember.chat_id).filter(
+            ChatMember.user_id == other.id,
+            ChatMember.chat_id.in_(select(subq))
+        ).all()]
+        existing = db.query(Chat).filter(
+            Chat.id.in_(existing_ids), Chat.is_group == False
+        ).first() if existing_ids else None
+        if existing:
+            return {"id": existing.id, "name": existing.name, "is_group": False, "existed": True}
+
+        chat = Chat(is_group=False, owner_id=current_user.id)
+        db.add(chat)
+        db.flush()
+        for u in members:
+            db.add(ChatMember(
+                chat_id=chat.id, user_id=u.id,
+                role='owner' if u.id == current_user.id else 'member'
+            ))
+        db.commit()
+        return {"id": chat.id, "name": None, "is_group": False, "existed": False}
+
+    # группа
+    chat = Chat(name=group.name or 'Группа', is_group=True, owner_id=current_user.id)
     db.add(chat)
     db.flush()
-    for user in members:
-        role = 'owner' if user.id == current_user.id else 'member'
-        db.add(ChatMember(chat_id=chat.id, user_id=user.id, role=role))
+    for u in members:
+        db.add(ChatMember(
+            chat_id=chat.id, user_id=u.id,
+            role='owner' if u.id == current_user.id else 'member'
+        ))
     db.commit()
-    return {"id": chat.id, "name": chat.name}
+    return {"id": chat.id, "name": chat.name, "is_group": True, "existed": False}
 
 
 def is_admin(user_id: int, chat_id: int, db: Session) -> bool:
@@ -378,6 +419,69 @@ def is_admin(user_id: int, chat_id: int, db: Session) -> bool:
         ChatMember.role.in_(['owner', 'admin'])
     ).first()
     return member is not None
+
+
+@app.post("/api/group/{chat_id}/avatar")
+async def upload_group_avatar(
+    chat_id: int,
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    chat = db.query(Chat).get(chat_id)
+    if not chat or not chat.is_group:
+        raise HTTPException(404, "Group not found")
+    if chat.owner_id != current_user.id:
+        raise HTTPException(403, "Only owner can change group avatar")
+
+    ext = os.path.splitext(file.filename)[1] or '.png'
+    filename = f"group_{chat_id}_{uuid.uuid4().hex}{ext}"
+    filepath = os.path.join(UPLOAD_DIR, filename)
+    with open(filepath, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+
+    if chat.avatar_url:
+        old = os.path.join(UPLOAD_DIR, os.path.basename(chat.avatar_url))
+        if os.path.exists(old):
+            try: os.remove(old)
+            except: pass
+
+    chat.avatar_url = f"/uploads/{filename}"
+    db.commit()
+
+    await manager.broadcast_to_chat(chat_id, {
+        "type": "group_avatar_updated",
+        "chat_id": chat_id,
+        "avatar_url": chat.avatar_url
+    }, db)
+    return {"avatar_url": chat.avatar_url}
+
+
+@app.delete("/api/group/{chat_id}/avatar")
+async def delete_group_avatar(
+    chat_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    chat = db.query(Chat).get(chat_id)
+    if not chat or not chat.is_group:
+        raise HTTPException(404, "Group not found")
+    if chat.owner_id != current_user.id:
+        raise HTTPException(403, "Only owner can change group avatar")
+
+    if chat.avatar_url:
+        old = os.path.join(UPLOAD_DIR, os.path.basename(chat.avatar_url))
+        if os.path.exists(old):
+            try: os.remove(old)
+            except: pass
+        chat.avatar_url = None
+        db.commit()
+        await manager.broadcast_to_chat(chat_id, {
+            "type": "group_avatar_updated",
+            "chat_id": chat_id,
+            "avatar_url": None
+        }, db)
+    return {"ok": True}
 
 
 @app.delete("/api/chat/{chat_id}")
@@ -407,10 +511,13 @@ async def delete_chat(
         if m.file_url:
             p = os.path.join(UPLOAD_DIR, os.path.basename(m.file_url))
             if os.path.exists(p):
-                try:
-                    os.remove(p)
-                except Exception as e:
-                    print(f"Failed to delete {p}: {e}")
+                try: os.remove(p)
+                except: pass
+    if chat.avatar_url:
+        p = os.path.join(UPLOAD_DIR, os.path.basename(chat.avatar_url))
+        if os.path.exists(p):
+            try: os.remove(p)
+            except: pass
 
     if msg_ids:
         db.query(MessageHistory).filter(MessageHistory.message_id.in_(msg_ids)).delete(synchronize_session=False)
@@ -422,7 +529,6 @@ async def delete_chat(
 
     for uid in member_user_ids:
         await manager.send_personal_message({"type": "chat_deleted", "chat_id": chat_id}, uid)
-
     return {"status": "deleted"}
 
 
@@ -444,10 +550,10 @@ def search_messages(
         Message.is_deleted == False,
         Message.text.ilike(f"%{q}%")
     ).order_by(Message.created_at.desc()).limit(50).all()
-    result = []
+    out = []
     for msg in messages:
         author = db.query(User).get(msg.user_id)
-        result.append(MessageOut(
+        out.append(MessageOut(
             id=msg.id, user_id=msg.user_id,
             username=author.username if author else "unknown",
             text=msg.text, file_url=msg.file_url, file_type=msg.file_type,
@@ -455,7 +561,7 @@ def search_messages(
             edited_at=msg.edited_at.isoformat() if msg.edited_at else None,
             is_deleted=False
         ))
-    return result
+    return out
 
 
 # ---------- Upload ----------
@@ -468,8 +574,7 @@ async def upload_file(
     payload = decode_token(token)
     if not payload:
         raise HTTPException(401, "Invalid token")
-    user = db.query(User).get(int(payload["sub"]))
-    if not user:
+    if not db.query(User).get(int(payload["sub"])):
         raise HTTPException(404, "User not found")
 
     ext = os.path.splitext(file.filename)[1]
@@ -478,14 +583,13 @@ async def upload_file(
     with open(filepath, "wb") as f:
         shutil.copyfileobj(file.file, f)
 
-    content_type = file.content_type or ""
-    if content_type.startswith("image/"):
+    ct = file.content_type or ""
+    if ct.startswith("image/"):
         file_type = "image"
-    elif content_type.startswith("audio/"):
+    elif ct.startswith("audio/"):
         file_type = "audio"
     else:
         file_type = "document"
-
     return {"file_url": f"/uploads/{filename}", "file_type": file_type}
 
 
@@ -523,33 +627,27 @@ async def websocket_endpoint(websocket: WebSocket, token: str, db: Session = Dep
                 continue
 
             if msg_type == "edit":
-                message_id = data.get("message_id")
+                mid = data.get("message_id")
                 new_text = data.get("text", "")
-                msg = db.query(Message).filter(
-                    Message.id == message_id,
-                    Message.user_id == user_id
-                ).first()
+                msg = db.query(Message).filter(Message.id == mid, Message.user_id == user_id).first()
                 if msg and not msg.is_deleted:
                     db.add(MessageHistory(message_id=msg.id, old_text=msg.text or ""))
                     msg.text = new_text
                     msg.edited_at = datetime.utcnow()
                     db.commit()
                     await manager.broadcast_to_chat(msg.chat_id, {
-                        "type": "edit",
-                        "message_id": message_id,
-                        "text": new_text
+                        "type": "edit", "message_id": mid, "text": new_text
                     }, db)
                 continue
 
             if msg_type == "delete":
-                message_id = data.get("message_id")
-                msg = db.query(Message).filter(Message.id == message_id).first()
+                mid = data.get("message_id")
+                msg = db.query(Message).filter(Message.id == mid).first()
                 if msg and (msg.user_id == user_id or (msg.chat.is_group and is_admin(user_id, msg.chat_id, db))):
                     msg.is_deleted = True
                     db.commit()
                     await manager.broadcast_to_chat(msg.chat_id, {
-                        "type": "delete",
-                        "message_id": message_id
+                        "type": "delete", "message_id": mid
                     }, db)
                 continue
 
@@ -561,11 +659,9 @@ async def websocket_endpoint(websocket: WebSocket, token: str, db: Session = Dep
 
             target_chat_id = None
             if chat_id:
-                member = db.query(ChatMember).filter(
-                    ChatMember.chat_id == chat_id,
-                    ChatMember.user_id == user_id
-                ).first()
-                if not member:
+                if not db.query(ChatMember).filter(
+                    ChatMember.chat_id == chat_id, ChatMember.user_id == user_id
+                ).first():
                     continue
                 target_chat_id = chat_id
             elif recipient_username:
@@ -583,12 +679,12 @@ async def websocket_endpoint(websocket: WebSocket, token: str, db: Session = Dep
                 if personal:
                     target_chat_id = personal.id
                 else:
-                    new_chat = Chat(is_group=False)
+                    new_chat = Chat(is_group=False, owner_id=user_id)
                     db.add(new_chat)
                     db.flush()
                     db.add_all([
-                        ChatMember(chat_id=new_chat.id, user_id=user_id),
-                        ChatMember(chat_id=new_chat.id, user_id=recipient.id)
+                        ChatMember(chat_id=new_chat.id, user_id=user_id, role='owner'),
+                        ChatMember(chat_id=new_chat.id, user_id=recipient.id, role='member')
                     ])
                     db.commit()
                     target_chat_id = new_chat.id
@@ -607,26 +703,25 @@ async def websocket_endpoint(websocket: WebSocket, token: str, db: Session = Dep
             db.flush()
 
             chat_members = db.query(ChatMember).filter(ChatMember.chat_id == target_chat_id).all()
-
-            for member in chat_members:
+            for m in chat_members:
                 db.add(MessageRead(
                     message_id=new_msg.id,
-                    user_id=member.user_id,
-                    read_at=datetime.utcnow() if member.user_id == user_id else None
+                    user_id=m.user_id,
+                    read_at=datetime.utcnow() if m.user_id == user_id else None
                 ))
 
-            for member in chat_members:
-                if member.user_id != user_id and member.user_id not in manager.active_connections:
+            for m in chat_members:
+                if m.user_id != user_id and m.user_id not in manager.active_connections:
                     now = datetime.utcnow()
-                    last = last_notification_time[member.user_id].get(target_chat_id)
+                    last = last_notification_time[m.user_id].get(target_chat_id)
                     if not last or (now - last) >= timedelta(minutes=1):
                         body = f"{current_user.username}: {text or 'Новое сообщение'}"
-                        send_push_notification(member.user_id, current_user.username, body, db)
-                        last_notification_time[member.user_id][target_chat_id] = now
+                        send_push_notification(m.user_id, current_user.username, body, db)
+                        last_notification_time[m.user_id][target_chat_id] = now
 
             db.commit()
 
-            msg_data = {
+            await manager.broadcast_to_chat(target_chat_id, {
                 "id": new_msg.id,
                 "user_id": user_id,
                 "username": current_user.username,
@@ -635,8 +730,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str, db: Session = Dep
                 "file_type": file_type or None,
                 "created_at": new_msg.created_at.isoformat(),
                 "chat_id": target_chat_id
-            }
-            await manager.broadcast_to_chat(target_chat_id, msg_data, db)
+            }, db)
 
     except WebSocketDisconnect:
         manager.disconnect(user_id)
@@ -653,11 +747,9 @@ def mark_read(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    member = db.query(ChatMember).filter(
-        ChatMember.chat_id == chat_id,
-        ChatMember.user_id == current_user.id
-    ).first()
-    if not member:
+    if not db.query(ChatMember).filter(
+        ChatMember.chat_id == chat_id, ChatMember.user_id == current_user.id
+    ).first():
         raise HTTPException(403, "Not a member")
 
     msg_ids = [m.id for m in db.query(Message.id).filter(Message.chat_id == chat_id).all()]
@@ -665,24 +757,21 @@ def mark_read(
         return {"status": "ok"}
 
     now = datetime.utcnow()
-    existing = db.query(MessageRead).filter(
+    existing = {r.message_id: r for r in db.query(MessageRead).filter(
         MessageRead.user_id == current_user.id,
         MessageRead.message_id.in_(msg_ids)
-    ).all()
-    existing_map = {r.message_id: r for r in existing}
-
+    ).all()}
     for mid in msg_ids:
-        if mid in existing_map:
-            if existing_map[mid].read_at is None:
-                existing_map[mid].read_at = now
+        if mid in existing:
+            if existing[mid].read_at is None:
+                existing[mid].read_at = now
         else:
             db.add(MessageRead(message_id=mid, user_id=current_user.id, read_at=now))
-
     db.commit()
     return {"status": "ok"}
 
 
-# ---------- История ----------
+# ---------- History ----------
 @app.get("/api/message_history/{message_id}", response_model=List[MessageHistoryOut])
 def get_message_history(
     message_id: int,
@@ -692,11 +781,9 @@ def get_message_history(
     msg = db.query(Message).get(message_id)
     if not msg:
         raise HTTPException(404, "Message not found")
-    member = db.query(ChatMember).filter(
-        ChatMember.chat_id == msg.chat_id,
-        ChatMember.user_id == current_user.id
-    ).first()
-    if not member:
+    if not db.query(ChatMember).filter(
+        ChatMember.chat_id == msg.chat_id, ChatMember.user_id == current_user.id
+    ).first():
         raise HTTPException(403, "Access denied")
     history = db.query(MessageHistory).filter(
         MessageHistory.message_id == message_id
@@ -704,18 +791,16 @@ def get_message_history(
     return [{"old_text": h.old_text, "edited_at": h.edited_at.isoformat()} for h in history]
 
 
-# ---------- Экспорт чата в PDF ----------
+# ---------- PDF Export ----------
 @app.get("/api/chat/{chat_id}/export")
 async def export_chat(
     chat_id: int,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    member = db.query(ChatMember).filter(
-        ChatMember.chat_id == chat_id,
-        ChatMember.user_id == current_user.id
-    ).first()
-    if not member:
+    if not db.query(ChatMember).filter(
+        ChatMember.chat_id == chat_id, ChatMember.user_id == current_user.id
+    ).first():
         raise HTTPException(403, "Not a member")
     chat = db.query(Chat).get(chat_id)
     if not chat:
@@ -728,40 +813,40 @@ async def export_chat(
         chat_name = other.username if other else "Chat"
 
     messages = db.query(Message).filter(
-        Message.chat_id == chat_id,
-        Message.is_deleted == False
+        Message.chat_id == chat_id, Message.is_deleted == False
     ).order_by(Message.created_at).all()
 
-    html_content = f"""<html><head><meta charset="utf-8"><title>Export</title>
-    <style>
-      body{{font-family:Arial,sans-serif;margin:40px}}
-      .message{{margin-bottom:20px;padding:10px;border-bottom:1px solid #ccc}}
-      .author{{font-weight:bold;color:#2c7be5}}
-      .date{{font-size:.8em;color:#666}}
-    </style></head><body><h1>{escape(chat_name)}</h1>"""
-
-    for msg in messages:
-        user = db.query(User).get(msg.user_id)
-        html_content += (
+    html = (
+        f'<html><head><meta charset="utf-8"><title>Export</title>'
+        f'<style>body{{font-family:Arial,sans-serif;margin:40px}}'
+        f'.message{{margin-bottom:20px;padding:10px;border-bottom:1px solid #ccc}}'
+        f'.author{{font-weight:bold;color:#2c7be5}}.date{{font-size:.8em;color:#666}}</style>'
+        f'</head><body><h1>{escape(chat_name)}</h1>'
+    )
+    for m in messages:
+        u = db.query(User).get(m.user_id)
+        html += (
             f'<div class="message">'
-            f'<div class="author">{escape(user.username if user else "unknown")}</div>'
-            f'<div class="date">{msg.created_at}</div>'
-            f'<div class="text">{escape(msg.text or "")}</div>'
-            f'{"<div class=\"file\">Файл: " + escape(msg.file_url) + "</div>" if msg.file_url else ""}'
+            f'<div class="author">{escape(u.username if u else "unknown")}</div>'
+            f'<div class="date">{m.created_at}</div>'
+            f'<div class="text">{escape(m.text or "")}</div>'
+            f'{"<div class=\"file\">Файл: " + escape(m.file_url) + "</div>" if m.file_url else ""}'
             f'</div>'
         )
-    html_content += "</body></html>"
+    html += "</body></html>"
 
     with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp:
-        HTML(string=html_content).write_pdf(tmp.name)
-        return FileResponse(
-            tmp.name,
-            filename=f"chat_{chat_id}_{datetime.now().strftime('%Y%m%d')}.pdf",
-            media_type='application/pdf'
-        )
+        HTML(string=html).write_pdf(tmp.name)
+        path = tmp.name
+    return FileResponse(
+        path,
+        filename=f"chat_{chat_id}_{datetime.now().strftime('%Y%m%d')}.pdf",
+        media_type='application/pdf',
+        background=BackgroundTask(lambda: os.unlink(path) if os.path.exists(path) else None)
+    )
 
 
-# ---------- Логи ----------
+# ---------- Logs ----------
 @app.get("/api/connection_logs")
 def get_connection_logs(
     limit: int = 50,
@@ -836,10 +921,8 @@ class CacheControlMiddleware(BaseHTTPMiddleware):
         path = request.url.path
         if path.startswith('/static/'):
             if path.endswith(('.js', '.css', '.html')) or path.endswith('/'):
-                # Код меняется при каждом деплое — не кэшируем
                 response.headers['Cache-Control'] = 'no-cache, must-revalidate'
             else:
-                # Картинки, шрифты — можно кэшировать
                 response.headers['Cache-Control'] = 'public, max-age=86400'
         return response
 

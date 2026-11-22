@@ -57,13 +57,13 @@
                         <div id="nickname-display" style="font-size: 12px; opacity: 0.7;"></div>
                     </div>
                     <div class="panel-actions">
-                        <button id="timeline-btn" class="icon-btn"><i class="fas fa-chart-line"></i></button>
-                        <button id="settings-btn" class="icon-btn"><i class="fas fa-cog"></i></button>
-                        <button id="logout-btn" class="icon-btn"><i class="fas fa-sign-out-alt"></i></button>
+                        <button id="timeline-btn" class="icon-btn" title="История подключений"><i class="fas fa-chart-line"></i></button>
+                        <button id="settings-btn" class="icon-btn" title="Настройки"><i class="fas fa-cog"></i></button>
+                        <button id="logout-btn" class="icon-btn" title="Выйти"><i class="fas fa-sign-out-alt"></i></button>
                     </div>
                 </div>
                 <div class="chats-actions">
-                    <button id="new-group-btn" class="primary-btn full-width"><i class="fas fa-plus"></i> Новая группа</button>
+                    <button id="new-group-btn" class="primary-btn full-width"><i class="fas fa-plus"></i> Новый чат / группа</button>
                 </div>
                 <div class="chats-list" id="chats-list"></div>
             </aside>
@@ -71,11 +71,9 @@
             <main class="chat-main">
                 <div class="chat-header" id="chat-header">
                     <button id="back-to-chats-btn" class="mobile-back-btn" style="display: none;"><i class="fas fa-arrow-left"></i></button>
-                    <button id="export-chat-btn" class="icon-btn" style="display: none;" title="Экспорт чата"><i class="fas fa-download"></i></button>
                     <div class="chat-title" id="chat-title">Выберите чат</div>
                     <div class="chat-actions">
-                        <button id="delete-chat-btn" class="icon-btn" style="display: none;" title="Удалить чат"><i class="fas fa-trash-alt"></i></button>
-                        <button id="search-messages-btn" class="icon-btn" style="display: none;" title="Поиск"><i class="fas fa-search"></i></button>
+                        <button id="chat-menu-btn" class="icon-btn" style="display: none;" title="Действия"><i class="fas fa-ellipsis-v"></i></button>
                         <div class="connection-status" id="connection-status"><i class="fas fa-circle"></i></div>
                         <div class="push-status" id="push-status"><i class="fas fa-bell"></i></div>
                     </div>
@@ -94,11 +92,24 @@
         </div>
     </div>
 
-    <!-- Создание группы -->
+    <div id="msg-action-popup" class="popup-menu" style="display: none;">
+        <button data-action="edit">✏️ Редактировать</button>
+        <button data-action="delete">🗑️ Удалить</button>
+        <button data-action="copy">📋 Скопировать текст</button>
+    </div>
+
+    <div id="chat-action-popup" class="popup-menu" style="display: none;">
+        <button data-action="search">🔍 Поиск по чату</button>
+        <button data-action="export">📥 Экспорт в PDF</button>
+        <button data-action="avatar">🖼️ Аватар группы</button>
+        <button data-action="delete">🗑️ Удалить чат</button>
+    </div>
+
     <div id="group-modal" class="modal">
         <div class="modal-content">
-            <div class="modal-header"><h3>Создать группу</h3><button class="close-modal">&times;</button></div>
-            <input type="text" id="group-name" placeholder="Название группы">
+            <div class="modal-header"><h3>Новый чат / группа</h3><button class="close-modal">&times;</button></div>
+            <p style="font-size:13px;color:#888;margin-bottom:12px;">Один участник — обычный чат. Двое и больше — группа (название обязательно).</p>
+            <input type="text" id="group-name" placeholder="Название группы (если >1 участника)">
             <input type="text" id="user-search" placeholder="Поиск пользователей...">
             <div id="search-results" class="search-results"></div>
             <div class="selected-users">
@@ -109,7 +120,6 @@
         </div>
     </div>
 
-    <!-- Настройки -->
     <div id="settings-modal" class="modal">
         <div class="modal-content">
             <div class="modal-header"><h3>Настройки</h3><button class="close-modal">&times;</button></div>
@@ -147,7 +157,6 @@
         </div>
     </div>
 
-    <!-- Поиск сообщений -->
     <div id="search-modal" class="modal">
         <div class="modal-content">
             <div class="modal-header"><h3>Поиск сообщений</h3><button class="close-modal">&times;</button></div>
@@ -156,7 +165,6 @@
         </div>
     </div>
 
-    <!-- Профиль -->
     <div id="profile-modal" class="modal">
         <div class="modal-content">
             <div class="modal-header"><h3>Профиль</h3><button class="close-modal">&times;</button></div>
@@ -182,7 +190,26 @@
         </div>
     </div>
 
-    <!-- Timeline -->
+    <div id="group-avatar-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header"><h3>Аватар группы</h3><button class="close-modal">&times;</button></div>
+            <div style="display:flex; justify-content:center; margin-bottom:16px;">
+                <div style="width:120px; height:120px; border-radius:50%; overflow:hidden; background:#ddd; position:relative;">
+                    <img id="group-avatar-preview-img" style="width:100%; height:100%; object-fit:cover; display:none;">
+                    <div id="group-avatar-preview-letter" style="width:100%; height:100%; display:flex; align-items:center; justify-content:center; font-size:48px; font-weight:bold; color:#666;"></div>
+                </div>
+            </div>
+            <div class="settings-item">
+                <label>Выбрать изображение:</label>
+                <input type="file" id="group-avatar-file" accept="image/*">
+            </div>
+            <div class="modal-footer" style="display:flex; gap:8px;">
+                <button id="remove-group-avatar-btn" class="secondary-btn">Удалить</button>
+                <button id="save-group-avatar-btn" class="primary-btn">Сохранить</button>
+            </div>
+        </div>
+    </div>
+
     <div id="timeline-modal" class="modal">
         <div class="modal-content">
             <div class="modal-header"><h3>История подключений</h3><button class="close-modal">&times;</button></div>
@@ -191,10 +218,6 @@
     </div>
 
     <div id="panel-overlay" class="panel-overlay" style="display: none;"></div>
-    <div id="context-menu" class="context-menu" style="display: none;">
-        <button class="context-edit">✏️ Редактировать</button>
-        <button class="context-delete">🗑️ Удалить</button>
-    </div>
 
     <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
     <script type="module" src="/static/js/app.js"></script>

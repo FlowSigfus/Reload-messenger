@@ -40,7 +40,6 @@ function cleanupAudio(root) {
     root.querySelectorAll('.message').forEach(m => m.audioCleanup?.());
 }
 
-// ---------- Дедупликация ----------
 function isMessageDisplayed(id) {
     return !!messagesArea.querySelector(`.message[data-msg-id="${id}"]`);
 }
@@ -51,11 +50,31 @@ export async function loadChats() {
     if (!await checkAuth(resp)) return;
     if (!resp.ok) return;
     const chats = await resp.json();
+    const personal = chats.filter(c => !c.is_group);
+    const groups = chats.filter(c => c.is_group);
+
     const listDiv = document.getElementById('chats-list');
-    const fragment = document.createDocumentFragment();
-    for (const chat of chats) fragment.appendChild(createChatElement(chat));
     listDiv.innerHTML = '';
-    listDiv.appendChild(fragment);
+
+    if (personal.length) {
+        listDiv.appendChild(makeSectionHeader('Чаты'));
+        const frag = document.createDocumentFragment();
+        personal.forEach(c => frag.appendChild(createChatElement(c)));
+        listDiv.appendChild(frag);
+    }
+    if (groups.length) {
+        listDiv.appendChild(makeSectionHeader('Группы'));
+        const frag = document.createDocumentFragment();
+        groups.forEach(c => frag.appendChild(createChatElement(c)));
+        listDiv.appendChild(frag);
+    }
+}
+
+function makeSectionHeader(text) {
+    const h = document.createElement('div');
+    h.className = 'chats-section-header';
+    h.textContent = text;
+    return h;
 }
 
 function createChatElement(chat) {
@@ -63,23 +82,40 @@ function createChatElement(chat) {
     div.className = 'chat-item';
     if (chat.id === currentChatId) div.classList.add('active');
     div.dataset.chatId = chat.id;
+    div.dataset.isGroup = chat.is_group ? '1' : '0';
+    div.dataset.isOwner = chat.is_owner ? '1' : '0';
 
-    const nameStr = chat.is_group ? (chat.name || 'Группа') : (chat.other_user || '?');
-    const avatar = document.createElement('div');
-    avatar.className = 'chat-avatar';
-    avatar.textContent = (nameStr.charAt(0) || '?').toUpperCase();
+    const nameStr = chat.is_group
+    ? (chat.name || 'Группа')
+    : (chat.other_user || '?');
+
+    let avatarEl;
+    if (chat.avatar_url) {
+        avatarEl = document.createElement('img');
+        avatarEl.src = chat.avatar_url;
+        avatarEl.className = 'chat-avatar';
+        avatarEl.style.objectFit = 'cover';
+        avatarEl.alt = '';
+    } else {
+        avatarEl = document.createElement('div');
+        avatarEl.className = 'chat-avatar';
+        avatarEl.textContent = (nameStr.charAt(0) || '?').toUpperCase();
+    }
 
     const info = document.createElement('div');
     info.className = 'chat-info';
     const name = document.createElement('div');
     name.className = 'chat-name';
-    name.textContent = chat.is_group ? (chat.name || 'Группа') : `Чат с ${chat.other_user || '?'}`;
+    name.textContent = chat.is_group
+    ? (chat.name || 'Группа')
+    : `Чат с ${chat.other_user || '?'}`;
     const lastMsg = document.createElement('div');
     lastMsg.className = 'chat-last-message';
     lastMsg.textContent = chat.last_message || 'Нет сообщений';
     info.appendChild(name);
     info.appendChild(lastMsg);
-    div.appendChild(avatar);
+
+    div.appendChild(avatarEl);
     div.appendChild(info);
 
     if (chat.unread_count > 0) {
@@ -114,6 +150,26 @@ export function updateChatInList(chatId, lastMessage, hasUnread = false) {
     }
 }
 
+export function updateChatAvatar(chatId, avatarUrl, name) {
+    const item = document.querySelector(`.chat-item[data-chat-id="${chatId}"]`);
+    if (!item) return;
+    const existing = item.querySelector('.chat-avatar');
+    if (existing) existing.remove();
+
+    let newAvatar;
+    if (avatarUrl) {
+        newAvatar = document.createElement('img');
+        newAvatar.src = avatarUrl;
+        newAvatar.style.objectFit = 'cover';
+        newAvatar.alt = '';
+    } else {
+        newAvatar = document.createElement('div');
+        newAvatar.textContent = (name || '?').charAt(0).toUpperCase();
+    }
+    newAvatar.className = 'chat-avatar';
+    item.insertBefore(newAvatar, item.firstChild);
+}
+
 // ---------- Выбор чата ----------
 export async function selectChat(chatId) {
     setCurrentChatId(chatId);
@@ -137,9 +193,7 @@ export async function selectChat(chatId) {
         document.getElementById('chat-title').textContent = 'Чат';
     }
 
-    document.getElementById('delete-chat-btn').style.display = 'inline-block';
-    document.getElementById('search-messages-btn').style.display = 'inline-block';
-    document.getElementById('export-chat-btn').style.display = 'inline-block';
+    document.getElementById('chat-menu-btn').style.display = 'inline-block';
 
     if (window.matchMedia('(max-width: 768px)').matches) {
         document.body.classList.add('chat-open');
@@ -163,7 +217,6 @@ export async function loadLatestMessages(expectedChatId = currentChatId) {
         if (currentChatId !== expectedChatId) return;
         const messages = await resp.json();
         if (currentChatId !== expectedChatId) return;
-
         if (messages.length === 0) { hasMoreMessages = false; return; }
         oldestMessageId = messages[0].id;
 
@@ -173,7 +226,6 @@ export async function loadLatestMessages(expectedChatId = currentChatId) {
             fragment.appendChild(await createMessageElement(msg));
         }
         messagesArea.appendChild(fragment);
-
         requestAnimationFrame(() => { messagesArea.scrollTop = messagesArea.scrollHeight; });
         if (messages.length < limit) hasMoreMessages = false;
     } catch (e) {
@@ -207,7 +259,6 @@ export async function loadMoreMessages() {
         }
         messagesArea.insertBefore(fragment, messagesArea.firstChild);
         oldestMessageId = messages[0].id;
-
         const newH = messagesArea.scrollHeight;
         messagesArea.scrollTop = oldT + (newH - oldH);
         if (messages.length < 20) hasMoreMessages = false;
@@ -228,7 +279,7 @@ export async function markRead(chatId) {
     if (unreadSpan) unreadSpan.remove();
 }
 
-// ---------- Отрисовка сообщения ----------
+// ---------- Сообщение ----------
 async function createMessageElement(msg) {
     const div = document.createElement('div');
     div.className = `message ${msg.user_id === currentUserId ? 'sent' : 'received'}`;
@@ -318,30 +369,24 @@ async function createMessageElement(msg) {
 
     div.appendChild(content);
 
-    if (msg.user_id === currentUserId && window.innerWidth > 768) {
-        const actions = document.createElement('div');
-        actions.className = 'message-actions';
-        const editBtn = document.createElement('button');
-        editBtn.innerHTML = '<i class="fas fa-edit"></i>';
-        editBtn.onclick = (e) => {
-            e.stopPropagation();
-            const newText = prompt('Редактировать сообщение:', msg.text || '');
-            if (newText !== null && newText !== msg.text) editMessage(msg.id, newText);
-        };
-            const delBtn = document.createElement('button');
-            delBtn.innerHTML = '<i class="fas fa-trash"></i>';
-            delBtn.onclick = (e) => {
-                e.stopPropagation();
-                if (confirm('Удалить сообщение?')) deleteMessage(msg.id);
-            };
-                actions.appendChild(editBtn);
-                actions.appendChild(delBtn);
-                div.appendChild(actions);
-    }
+    const menuBtn = document.createElement('button');
+    menuBtn.type = 'button';
+    menuBtn.className = 'msg-menu-btn';
+    menuBtn.innerHTML = '<i class="fas fa-ellipsis-v"></i>';
+    menuBtn.setAttribute('aria-label', 'Действия');
+    menuBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        window.__openMsgMenu?.(menuBtn, {
+            id: msg.id,
+            text: msg.text || '',
+            own: msg.user_id === currentUserId
+        });
+    });
+    div.appendChild(menuBtn);
 
     if (msg.edited_at) {
         textBody.style.cursor = 'pointer';
-        textBody.title = 'Показать историю изменений';
+        textBody.title = 'Показать историю';
         textBody.addEventListener('click', async () => {
             const resp = await fetch(`/api/message_history/${msg.id}`, {
                 headers: { 'Authorization': `Bearer ${token}` }
@@ -375,7 +420,7 @@ function makeFileLink(url, fileName, fileIcon) {
 }
 
 export async function displayMessage(msg) {
-    if (isMessageDisplayed(msg.id)) return;       // ← дедуп
+    if (isMessageDisplayed(msg.id)) return;
     const el = await createMessageElement(msg);
     const nearBottom = (messagesArea.scrollHeight - messagesArea.scrollTop - messagesArea.clientHeight) < 120;
     messagesArea.appendChild(el);
@@ -390,7 +435,6 @@ export async function sendMessageWithFiles() {
 
     isSending = true;
     setSendButtonLoading(true);
-
     try {
         if (selectedFiles.length) {
             await sendMultipleFiles(selectedFiles);
@@ -417,10 +461,8 @@ async function sendMultipleFiles(files) {
         const data = await resp.json().catch(() => ({}));
         if (resp.ok) {
             sendWebSocketMessage({
-                type: 'file',
-                chat_id: currentChatId,
-                file_url: data.file_url,
-                file_type: data.file_type
+                type: 'file', chat_id: currentChatId,
+                file_url: data.file_url, file_type: data.file_type
             });
         }
         await new Promise(r => setTimeout(r, 200));
@@ -490,10 +532,7 @@ export async function deleteChat() {
         document.getElementById('chat-title').textContent = 'Выберите чат';
         messagesArea.innerHTML = '';
         await loadChats();
-        ['delete-chat-btn', 'search-messages-btn', 'export-chat-btn'].forEach(id => {
-            const el = document.getElementById(id);
-            if (el) el.style.display = 'none';
-        });
+        document.getElementById('chat-menu-btn').style.display = 'none';
     } else if (resp.status === 403) {
         alert('Удалить группу может только её создатель');
     }

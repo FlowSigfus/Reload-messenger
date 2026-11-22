@@ -302,3 +302,171 @@ body.retro-theme #forgot-password-form,body.retro-theme #reset-password-form{bor
 body.dark-theme #forgot-password-form input,body.dark-theme #reset-password-form input{background:#3a3f4b;border-color:#2f3542;color:#e4e6eb}
 body.cyberpunk-theme #forgot-password-form input,body.cyberpunk-theme #reset-password-form input{background:#0f1722;border-color:#00ffcc;color:#00ffcc}
 body.retro-theme #forgot-password-form input,body.retro-theme #reset-password-form input{background:#fffdf9;border-color:#8b7a6b;border-radius:0}
+
+
+/* ===== Фикс кнопок в .settings-item (белый текст на белом фоне) ===== */
+.settings-item .secondary-btn,
+.modal-content .secondary-btn {
+    background: #6c757d !important;
+    color: #fff !important;
+    border: none;
+    padding: 10px 16px;
+    border-radius: 12px;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 500;
+}
+.settings-item .secondary-btn:hover,
+.modal-content .secondary-btn:hover { background: #5a6268 !important; }
+.settings-item .secondary-btn:active,
+.modal-content .secondary-btn:active { background: #495057 !important; }
+
+body.dark-theme .settings-item .secondary-btn,
+body.dark-theme .modal-content .secondary-btn { background: #4a5568 !important; }
+body.dark-theme .settings-item .secondary-btn:hover { background: #5a6472 !important; }
+
+body.cyberpunk-theme .settings-item .secondary-btn,
+body.cyberpunk-theme .modal-content .secondary-btn {
+    background: #00ffcc !important;
+    color: #0a0f1a !important;
+}
+body.retro-theme .settings-item .secondary-btn,
+body.retro-theme .modal-content .secondary-btn {
+    background: #fffdf9 !important;
+    color: #2c2b28 !important;
+    border: 1px solid #8b7a6b !important;
+    border-radius: 0 !important;
+}
+
+/* ===== ⋮-кнопка в сообщении ===== */
+.msg-menu-btn {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border: none;
+    border-radius: 50%;
+    background: transparent;
+    color: rgba(0,0,0,0.35);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    transition: opacity .15s, background .15s;
+    font-size: 12px;
+    z-index: 3;
+}
+.message:hover .msg-menu-btn { opacity: 1; }
+.msg-menu-btn:hover { background: rgba(0,0,0,0.08); color: rgba(0,0,0,0.6); }
+.message.sent .msg-menu-btn { color: rgba(255,255,255,0.6); }
+.message.sent .msg-menu-btn:hover { background: rgba(255,255,255,0.2); color: #fff; }
+
+body.dark-theme .msg-menu-btn { color: rgba(255,255,255,0.5); }
+body.dark-theme .msg-menu-btn:hover { background: rgba(255,255,255,0.1); }
+body.cyberpunk-theme .msg-menu-btn { color: rgba(0,255,204,0.7); }
+body.cyberpunk-theme .msg-menu-btn:hover { background: rgba(0,255,204,0.15); }
+body.cyberpunk-theme .message.sent .msg-menu-btn { color: rgba(10,15,26,0.6); }
+
+/* ===== Popup-меню ===== */
+.popup-menu {
+    position: fixed;
+    min-width: 180px;
+    background: #fff;
+    border-radius: 12px;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.18);
+    padding: 6px;
+    z-index: 500;
+    display: none;
+}
+.popup-menu button {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 10px 12px;
+    background: none;
+    border: none;
+    text-align: left;
+    font-size: 14px;
+    color: #050505;
+    cursor: pointer;
+    border-radius: 8px;
+    font-family: inherit;
+}
+.popup-menu button:hover { background: rgba(0,0,0,0.05); }
+.popup-menu button:active { background: rgba(0,0,0,0.1); }
+
+body.dark-theme .popup-menu { background: #242a36; }
+body.dark-theme .popup-menu button { color: #e4e6eb; }
+body.dark-theme .popup-menu button:hover { background: rgba(255,255,255,0.08); }
+
+body.cyberpunk-theme .popup-menu {
+    background: #0f1722;
+    border: 1px solid #00ffcc;
+    box-shadow: 0 4px 20px rgba(0,255,204,0.2);
+}
+body.cyberpunk-theme .popup-menu button { color: #00ffcc; }
+body.cyberpunk-theme .popup-menu button:hover { background: rgba(0,255,204,0.15); }
+
+body.retro-theme .popup-menu {
+    background: #fffdf9;
+    border: 1px solid #8b7a6b;
+    border-radius: 0;
+    box-shadow: 2px 2px 0 rgba(0,0,0,0.2);
+}
+body.retro-theme .popup-menu button { color: #2c2b28; }
+body.retro-theme .popup-menu button:hover { background: #e8e0d5; }
+
+body.oled-theme .popup-menu { background: #000; border: 1px solid #1a1a1a; }
+body.oled-theme .popup-menu button { color: #e4e6eb; }
+body.oled-theme .popup-menu button:hover { background: rgba(255,255,255,0.1); }
+
+/* Удалённые: не показывать ⋮ */
+.message[data-deleted="1"] .msg-menu-btn { display: none; }
+
+
+/* ===== Разделители секций в списке чатов ===== */
+.chats-section-header {
+    padding: 12px 16px 4px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: #6c757d;
+    opacity: 0.8;
+}
+body.dark-theme .chats-section-header { color: #b0b3b8; }
+body.cyberpunk-theme .chats-section-header { color: #00ffcc; opacity: 0.6; }
+body.retro-theme .chats-section-header { color: #5e4b3c; }
+
+/* Аватар группы картинкой */
+img.chat-avatar {
+    object-fit: cover;
+}
+
+/* Фикс кнопок в .settings-item (белый текст на белом фоне) */
+.settings-item .secondary-btn,
+.modal-content .secondary-btn {
+    background: #6c757d !important;
+    color: #fff !important;
+    border: none;
+    padding: 10px 16px;
+    border-radius: 12px;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 500;
+}
+.settings-item .secondary-btn:hover,
+.modal-content .secondary-btn:hover { background: #5a6268 !important; }
+body.dark-theme .settings-item .secondary-btn,
+body.dark-theme .modal-content .secondary-btn { background: #4a5568 !important; }
+body.cyberpunk-theme .settings-item .secondary-btn,
+body.cyberpunk-theme .modal-content .secondary-btn { background: #00ffcc !important; color: #0a0f1a !important; }
+body.retro-theme .settings-item .secondary-btn,
+body.retro-theme .modal-content .secondary-btn {
+    background: #fffdf9 !important; color: #2c2b28 !important;
+    border: 1px solid #8b7a6b !important; border-radius: 0 !important;
+}
