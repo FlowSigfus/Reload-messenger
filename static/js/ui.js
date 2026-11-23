@@ -3,11 +3,10 @@ import { token } from './config.js';
 const savedTheme = localStorage.getItem('theme') || 'light';
 
 export function applyTheme(theme) {
-    document.body.classList.remove('light-theme', 'dark-theme', 'cyberpunk-theme', 'retro-theme', 'oled-theme');
+    document.body.classList.remove('light-theme', 'dark-theme', 'cyberpunk-theme', 'retro-theme');
     if (theme === 'dark') document.body.classList.add('dark-theme');
     else if (theme === 'cyberpunk') document.body.classList.add('cyberpunk-theme');
     else if (theme === 'retro') document.body.classList.add('retro-theme');
-    else if (theme === 'oled') document.body.classList.add('oled-theme');
 }
 applyTheme(savedTheme);
 
