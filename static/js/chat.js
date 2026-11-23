@@ -480,6 +480,18 @@ export function handleFileSelection(e) {
     }
     updateFilePreview();
     e.target.value = '';
+
+    async function compressImage(file, maxW = 1280, quality = 0.8) {
+        if (!file.type.startsWith('image/')) return file;
+        const img = await createImageBitmap(file);
+        if (img.width <= maxW) return file;
+        const canvas = document.createElement('canvas');
+        const scale = maxW / img.width;
+        canvas.width = maxW;
+        canvas.height = img.height * scale;
+        canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+        return new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', quality));
+    }
 }
 
 function updateFilePreview() {

@@ -92,3 +92,18 @@ export function createAudioPlayer(audioUrl, messageId) {
 
         return container;
 }
+
+audio.addEventListener('stalled', () => {
+    console.warn('Audio stalled, attempting reload...');
+    const currentTime = audio.currentTime;
+    audio.load();
+    audio.currentTime = currentTime;
+    if (isPlaying) audio.play().catch(() => {});
+});
+
+audio.addEventListener('error', (e) => {
+    console.error('Audio error:', e);
+    pause();
+    progressBar.style.width = '0%';
+    timeLabel.textContent = '0:00';
+});
