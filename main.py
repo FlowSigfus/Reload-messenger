@@ -1,5 +1,7 @@
 import os
 import re
+import io
+import base64
 import shutil
 import uuid
 import secrets
@@ -8,6 +10,8 @@ from typing import List, Optional
 from collections import defaultdict
 from html import escape
 
+import pyotp
+import qrcode
 from fastapi import (
     FastAPI, HTTPException, Depends, UploadFile, File, Form,
     WebSocket, WebSocketDisconnect, Header
@@ -17,16 +21,18 @@ from fastapi.responses import FileResponse, RedirectResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import or_, select
 from pydantic import BaseModel, EmailStr
+from passlib.context import CryptContext
 from starlette.background import BackgroundTask
 
 from database import (
     SessionLocal, User, Chat, ChatMember, Message, MessageRead,
-    PushSubscription, MessageHistory, ConnectionLog, PasswordResetToken
+    PushSubscription, MessageHistory, ConnectionLog, PasswordResetToken,
+    EmailOTPCode, BackupCode, PreAuthToken,
 )
 from auth import verify_password, get_password_hash, create_access_token, decode_token
 from websocket_manager import manager
 from push_utils import send_push_notification
-from email_utils import send_password_reset_email
+from email_utils import send_password_reset_email, send_2fa_code_email
 from dotenv import load_dotenv
 from weasyprint import HTML
 import tempfile
@@ -43,6 +49,104 @@ os.makedirs(EXPORT_DIR, exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 
 USERNAME_RE = re.compile(r'^[a-zA-Z0-9_]{3,32}$')
+
+# Хеширование короткоживущих кодов — pbkdf2_sha256 (без 72-байтного лимита bcrypt)
+code_hasher = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
+
+
+def hash_code(code: str) -> str:
+    return code_hasher.hash(code)
+
+
+def verify_code_hash(code: str, hashed: str) -> bool:
+    try:
+        return code_hasher.verify(code, hashed)
+    except Exception:
+        return False
+
+
+def generate_backup_codes(n: int = 10) -> List[str]:
+    """8-символьные hex-коды в формате xxxx-xxxx."""
+    return [f"{secrets.token_hex(4)[:4]}-{secrets.token_hex(4)[:4]}" for _ in range(n)]
+
+
+def make_totp_qr_base64(name: str, secret: str) -> str:
+    uri = pyotp.totp.TOTP(secret).provisioning_uri(name=name, issuer_name="Reload Messenger")
+    img = qrcode.make(uri)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+
+
+def verify_totp(user: User, code: str) -> bool:
+    if not user.totp_secret or not user.totp_enabled:
+        return False
+    code = code.strip().replace(" ", "")
+    if not code.isdigit():
+        return False
+    return pyotp.TOTP(user.totp_secret).verify(code, valid_window=1)
+
+
+def verify_and_consume_backup(user: User, code: str, db: Session) -> bool:
+    norm = code.strip().replace(" ", "").replace("-", "").lower()
+    for bc in db.query(BackupCode).filter(
+        BackupCode.user_id == user.id, BackupCode.used == False
+    ).all():
+        # хешируем и вариант с дефисом, и без — пользователь мог ввести по-разному
+        # но проще: у нас хеш от канонической формы xxxx-xxxx
+        for candidate in {code.strip(), f"{norm[:4]}-{norm[4:]}" if len(norm) == 8 else ""}:
+            if candidate and verify_code_hash(candidate, bc.code_hash):
+                bc.used = True
+                bc.used_at = datetime.utcnow()
+                db.commit()
+                return True
+    return False
+
+
+def create_email_otp(user: User, purpose: str, db: Session) -> str:
+    """Генерирует код, сохраняет хеш, возвращает сырой код (для отправки)."""
+    # Удаляем старые неиспользованные того же purpose
+    db.query(EmailOTPCode).filter(
+        EmailOTPCode.user_id == user.id,
+        EmailOTPCode.purpose == purpose,
+    ).delete()
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    db.add(EmailOTPCode(
+        user_id=user.id,
+        code_hash=hash_code(code),
+        purpose=purpose,
+        expires_at=datetime.utcnow() + timedelta(minutes=10),
+    ))
+    db.commit()
+    return code
+
+
+def verify_email_otp(user: User, code: str, purpose: str, db: Session) -> bool:
+    otp = db.query(EmailOTPCode).filter(
+        EmailOTPCode.user_id == user.id,
+        EmailOTPCode.purpose == purpose,
+    ).order_by(EmailOTPCode.created_at.desc()).first()
+
+    if not otp:
+        return False
+    if otp.expires_at < datetime.utcnow():
+        db.delete(otp)
+        db.commit()
+        return False
+    if otp.attempts >= 5:
+        db.delete(otp)
+        db.commit()
+        return False
+
+    otp.attempts += 1
+    db.commit()
+
+    if not verify_code_hash(code.strip(), otp.code_hash):
+        return False
+
+    db.delete(otp)
+    db.commit()
+    return True
 
 
 @app.get("/")
@@ -68,6 +172,25 @@ class UserUpdate(BaseModel):
 class UserLogin(BaseModel):
     username: str
     password: str
+
+
+class LoginStep2(BaseModel):
+    pre_auth_token: str
+    code: str
+    method: str  # 'totp' | 'email' | 'backup'
+
+
+class SendEmailOTPIn(BaseModel):
+    pre_auth_token: str
+
+
+class CodeIn(BaseModel):
+    code: str
+
+
+class Disable2FAIn(BaseModel):
+    password: str
+    code: str
 
 
 class ChatOut(BaseModel):
@@ -167,22 +290,263 @@ def login(user: UserLogin, db: Session = Depends(get_db)):
     db_user = db.query(User).filter(User.username == user.username).first()
     if not db_user or not verify_password(user.password, db_user.password_hash):
         raise HTTPException(401, "Invalid credentials")
+
+    # 2FA требуется?
+    if db_user.totp_enabled or db_user.email_otp_enabled:
+        # чистим старые протухшие pre-auth
+        db.query(PreAuthToken).filter(
+            PreAuthToken.user_id == db_user.id,
+            or_(PreAuthToken.used == True, PreAuthToken.expires_at < datetime.utcnow())
+        ).delete()
+
+        token = secrets.token_urlsafe(32)
+        db.add(PreAuthToken(
+            user_id=db_user.id,
+            token=token,
+            expires_at=datetime.utcnow() + timedelta(minutes=5),
+        ))
+        db.commit()
+
+        methods = []
+        if db_user.totp_enabled:
+            methods.append("totp")
+        if db_user.email_otp_enabled:
+            methods.append("email")
+        methods.append("backup")
+        return {
+            "needs_2fa": True,
+            "pre_auth_token": token,
+            "methods": methods,
+        }
+
     return {"access_token": create_access_token({"sub": str(db_user.id)}), "token_type": "bearer"}
 
 
+@app.post("/api/login/2fa")
+def login_2fa(data: LoginStep2, db: Session = Depends(get_db)):
+    pre = db.query(PreAuthToken).filter(
+        PreAuthToken.token == data.pre_auth_token,
+        PreAuthToken.used == False,
+        PreAuthToken.expires_at > datetime.utcnow(),
+    ).first()
+    if not pre:
+        raise HTTPException(401, "Invalid or expired pre-auth token")
+    if pre.attempts >= 10:
+        pre.used = True
+        db.commit()
+        raise HTTPException(429, "Too many attempts. Start login again.")
+    pre.attempts += 1
+    db.commit()
+
+    user = db.query(User).get(pre.user_id)
+    if not user:
+        raise HTTPException(404, "User not found")
+
+    ok = False
+    if data.method == "totp":
+        ok = verify_totp(user, data.code)
+    elif data.method == "email":
+        ok = verify_email_otp(user, data.code, "login", db)
+    elif data.method == "backup":
+        ok = verify_and_consume_backup(user, data.code, db)
+    else:
+        raise HTTPException(400, "Invalid method")
+
+    if not ok:
+        raise HTTPException(401, "Invalid code")
+
+    pre.used = True
+    db.commit()
+    return {"access_token": create_access_token({"sub": str(user.id)}), "token_type": "bearer"}
+
+
+@app.post("/api/login/2fa/send_email")
+def login_2fa_send_email(data: SendEmailOTPIn, db: Session = Depends(get_db)):
+    pre = db.query(PreAuthToken).filter(
+        PreAuthToken.token == data.pre_auth_token,
+        PreAuthToken.used == False,
+        PreAuthToken.expires_at > datetime.utcnow(),
+    ).first()
+    if not pre:
+        raise HTTPException(401, "Invalid or expired pre-auth token")
+    user = db.query(User).get(pre.user_id)
+    if not user or not user.email_otp_enabled:
+        raise HTTPException(400, "Email OTP not enabled")
+    if not user.email:
+        raise HTTPException(400, "No email on account")
+
+    code = create_email_otp(user, "login", db)
+    send_2fa_code_email(user.email, code)
+    return {"message": "Code sent"}
+
+
+# ---------- 2FA setup ----------
+@app.get("/api/2fa/status")
+def get_2fa_status(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    has_backup = db.query(BackupCode).filter(
+        BackupCode.user_id == current_user.id,
+        BackupCode.used == False,
+    ).count()
+    return {
+        "totp_enabled": bool(current_user.totp_enabled),
+        "email_otp_enabled": bool(current_user.email_otp_enabled),
+        "backup_codes_remaining": has_backup,
+    }
+
+
+@app.post("/api/2fa/totp/setup")
+def setup_totp(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if current_user.totp_enabled:
+        raise HTTPException(400, "TOTP already enabled. Disable first.")
+    secret = pyotp.random_base32()
+    current_user.totp_secret = secret
+    db.commit()
+    name = current_user.email or current_user.username
+    qr = make_totp_qr_base64(name, secret)
+    return {"secret": secret, "qr_code": qr}
+
+
+@app.post("/api/2fa/totp/confirm")
+def confirm_totp(
+    data: CodeIn,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    if not current_user.totp_secret:
+        raise HTTPException(400, "Call /api/2fa/totp/setup first")
+    if current_user.totp_enabled:
+        raise HTTPException(400, "TOTP already enabled")
+    if not pyotp.TOTP(current_user.totp_secret).verify(data.code.strip(), valid_window=1):
+        raise HTTPException(401, "Invalid code")
+
+    current_user.totp_enabled = True
+    db.commit()
+
+    # Сгенерировать backup-коды
+    codes = generate_backup_codes(10)
+    db.query(BackupCode).filter(BackupCode.user_id == current_user.id).delete()
+    for c in codes:
+        db.add(BackupCode(user_id=current_user.id, code_hash=hash_code(c)))
+    db.commit()
+
+    return {"backup_codes": codes}
+
+
+@app.post("/api/2fa/totp/disable")
+def disable_totp(
+    data: Disable2FAIn,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    if not verify_password(data.password, current_user.password_hash):
+        raise HTTPException(401, "Invalid password")
+    if not verify_totp(current_user, data.code) and not verify_and_consume_backup(current_user, data.code, db):
+        raise HTTPException(401, "Invalid code")
+
+    current_user.totp_enabled = False
+    current_user.totp_secret = None
+    # Backup-коды остаются, если email OTP ещё включён; иначе удалить
+    if not current_user.email_otp_enabled:
+        db.query(BackupCode).filter(BackupCode.user_id == current_user.id).delete()
+    db.commit()
+    return {"message": "TOTP disabled"}
+
+
+@app.post("/api/2fa/email/enable")
+def enable_email_otp(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if not current_user.email:
+        raise HTTPException(400, "Set email in profile first")
+    code = create_email_otp(current_user, "setup", db)
+    send_2fa_code_email(current_user.email, code)
+    return {"message": "Confirmation code sent to email"}
+
+
+@app.post("/api/2fa/email/confirm")
+def confirm_email_otp(
+    data: CodeIn,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    if not verify_email_otp(current_user, data.code, "setup", db):
+        raise HTTPException(401, "Invalid code")
+
+    current_user.email_otp_enabled = True
+    db.commit()
+
+    # Если TOTP не включён — сгенерировать backup-коды на случай потери доступа к email
+    if not current_user.totp_enabled:
+        has_backup = db.query(BackupCode).filter(
+            BackupCode.user_id == current_user.id, BackupCode.used == False
+        ).count()
+        if has_backup == 0:
+            codes = generate_backup_codes(10)
+            for c in codes:
+                db.add(BackupCode(user_id=current_user.id, code_hash=hash_code(c)))
+            db.commit()
+            return {"message": "Email OTP enabled", "backup_codes": codes}
+    return {"message": "Email OTP enabled"}
+
+
+@app.post("/api/2fa/email/disable")
+def disable_email_otp(
+    data: Disable2FAIn,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    if not verify_password(data.password, current_user.password_hash):
+        raise HTTPException(401, "Invalid password")
+    if current_user.email_otp_enabled and not verify_email_otp(current_user, data.code, "login", db):
+        # допускаем TOTP/backup как альтернативу
+        if not verify_totp(current_user, data.code) and not verify_and_consume_backup(current_user, data.code, db):
+            raise HTTPException(401, "Invalid code")
+
+    current_user.email_otp_enabled = False
+    if not current_user.totp_enabled:
+        db.query(BackupCode).filter(BackupCode.user_id == current_user.id).delete()
+    db.commit()
+    return {"message": "Email OTP disabled"}
+
+
+@app.post("/api/2fa/backup_codes/regenerate")
+def regenerate_backup_codes(
+    data: Disable2FAIn,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    if not verify_password(data.password, current_user.password_hash):
+        raise HTTPException(401, "Invalid password")
+    ok = False
+    if current_user.totp_enabled and verify_totp(current_user, data.code):
+        ok = True
+    if not ok and current_user.email_otp_enabled and verify_email_otp(current_user, data.code, "login", db):
+        ok = True
+    if not ok and verify_and_consume_backup(current_user, data.code, db):
+        ok = True
+    if not ok:
+        raise HTTPException(401, "Invalid code")
+
+    codes = generate_backup_codes(10)
+    db.query(BackupCode).filter(BackupCode.user_id == current_user.id).delete()
+    for c in codes:
+        db.add(BackupCode(user_id=current_user.id, code_hash=hash_code(c)))
+    db.commit()
+    return {"backup_codes": codes}
+
+
+# ---------- Password reset ----------
 @app.post("/api/forgot_password")
 def forgot_password(data: ForgotPasswordIn, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == data.email).first()
     if user:
         db.query(PasswordResetToken).filter(
             PasswordResetToken.user_id == user.id,
-            PasswordResetToken.used == False
+            PasswordResetToken.used == False,
         ).delete()
         token = secrets.token_urlsafe(32)
         db.add(PasswordResetToken(
             user_id=user.id,
             token=token,
-            expires_at=datetime.utcnow() + timedelta(hours=1)
+            expires_at=datetime.utcnow() + timedelta(hours=1),
         ))
         db.commit()
         send_password_reset_email(user.email, token)
@@ -194,7 +558,7 @@ def reset_password(data: ResetPasswordIn, db: Session = Depends(get_db)):
     reset = db.query(PasswordResetToken).filter(
         PasswordResetToken.token == data.token,
         PasswordResetToken.used == False,
-        PasswordResetToken.expires_at > datetime.utcnow()
+        PasswordResetToken.expires_at > datetime.utcnow(),
     ).first()
     if not reset:
         raise HTTPException(400, "Invalid or expired token")
@@ -209,6 +573,7 @@ def reset_password(data: ResetPasswordIn, db: Session = Depends(get_db)):
     return {"message": "Password reset successfully"}
 
 
+# ---------- Profile ----------
 @app.get("/api/user/me")
 def get_me(current_user: User = Depends(get_current_user)):
     return {
@@ -219,7 +584,9 @@ def get_me(current_user: User = Depends(get_current_user)):
         "last_name": current_user.last_name,
         "birth_year": current_user.birth_year,
         "created_at": current_user.created_at.isoformat(),
-        "avatar_url": current_user.avatar_url
+        "avatar_url": current_user.avatar_url,
+        "totp_enabled": bool(current_user.totp_enabled),
+        "email_otp_enabled": bool(current_user.email_otp_enabled),
     }
 
 
@@ -284,12 +651,12 @@ def get_chats(current_user: User = Depends(get_current_user), db: Session = Depe
             is_owner=(chat.owner_id == current_user.id),
             other_user=None,
             last_message=None,
-            unread_count=0
+            unread_count=0,
         )
         if not chat.is_group:
             other_member = db.query(ChatMember).filter(
                 ChatMember.chat_id == chat.id,
-                ChatMember.user_id != current_user.id
+                ChatMember.user_id != current_user.id,
             ).first()
             if other_member:
                 other_user = db.query(User).get(other_member.user_id)
@@ -298,7 +665,7 @@ def get_chats(current_user: User = Depends(get_current_user), db: Session = Depe
 
         last_msg = db.query(Message).filter(
             Message.chat_id == chat.id,
-            Message.is_deleted == False
+            Message.is_deleted == False,
         ).order_by(Message.created_at.desc()).first()
         if last_msg:
             out.last_message = last_msg.text or "Медиафайл"
@@ -307,7 +674,7 @@ def get_chats(current_user: User = Depends(get_current_user), db: Session = Depe
             Message.chat_id == chat.id,
             Message.is_deleted == False,
             MessageRead.user_id == current_user.id,
-            MessageRead.read_at.is_(None)
+            MessageRead.read_at.is_(None),
         ).count()
         result.append(out)
     return result
@@ -323,7 +690,7 @@ def get_messages(
 ):
     member = db.query(ChatMember).filter(
         ChatMember.chat_id == chat_id,
-        ChatMember.user_id == current_user.id
+        ChatMember.user_id == current_user.id,
     ).first()
     if not member:
         raise HTTPException(403, "Not a member")
@@ -346,7 +713,7 @@ def get_messages(
             file_type=msg.file_type if not msg.is_deleted else None,
             created_at=msg.created_at.isoformat(),
             edited_at=msg.edited_at.isoformat() if msg.edited_at else None,
-            is_deleted=msg.is_deleted
+            is_deleted=msg.is_deleted,
         ))
     return result
 
@@ -369,7 +736,6 @@ def create_group(
     if current_user not in members:
         members.append(current_user)
 
-    # 1-on-1 → обычный чат
     if len(members) == 2:
         other = next(m for m in members if m.id != current_user.id)
         subq = db.query(ChatMember.chat_id).filter(
@@ -377,7 +743,7 @@ def create_group(
         ).subquery()
         existing_ids = [c[0] for c in db.query(ChatMember.chat_id).filter(
             ChatMember.user_id == other.id,
-            ChatMember.chat_id.in_(select(subq))
+            ChatMember.chat_id.in_(select(subq)),
         ).all()]
         existing = db.query(Chat).filter(
             Chat.id.in_(existing_ids), Chat.is_group == False
@@ -391,19 +757,18 @@ def create_group(
         for u in members:
             db.add(ChatMember(
                 chat_id=chat.id, user_id=u.id,
-                role='owner' if u.id == current_user.id else 'member'
+                role='owner' if u.id == current_user.id else 'member',
             ))
         db.commit()
         return {"id": chat.id, "name": None, "is_group": False, "existed": False}
 
-    # группа
     chat = Chat(name=group.name or 'Группа', is_group=True, owner_id=current_user.id)
     db.add(chat)
     db.flush()
     for u in members:
         db.add(ChatMember(
             chat_id=chat.id, user_id=u.id,
-            role='owner' if u.id == current_user.id else 'member'
+            role='owner' if u.id == current_user.id else 'member',
         ))
     db.commit()
     return {"id": chat.id, "name": chat.name, "is_group": True, "existed": False}
@@ -413,12 +778,11 @@ def is_admin(user_id: int, chat_id: int, db: Session) -> bool:
     chat = db.query(Chat).get(chat_id)
     if chat and chat.owner_id == user_id:
         return True
-    member = db.query(ChatMember).filter(
+    return db.query(ChatMember).filter(
         ChatMember.chat_id == chat_id,
         ChatMember.user_id == user_id,
-        ChatMember.role.in_(['owner', 'admin'])
-    ).first()
-    return member is not None
+        ChatMember.role.in_(['owner', 'admin']),
+    ).first() is not None
 
 
 @app.post("/api/group/{chat_id}/avatar")
@@ -452,7 +816,7 @@ async def upload_group_avatar(
     await manager.broadcast_to_chat(chat_id, {
         "type": "group_avatar_updated",
         "chat_id": chat_id,
-        "avatar_url": chat.avatar_url
+        "avatar_url": chat.avatar_url,
     }, db)
     return {"avatar_url": chat.avatar_url}
 
@@ -479,7 +843,7 @@ async def delete_group_avatar(
         await manager.broadcast_to_chat(chat_id, {
             "type": "group_avatar_updated",
             "chat_id": chat_id,
-            "avatar_url": None
+            "avatar_url": None,
         }, db)
     return {"ok": True}
 
@@ -495,7 +859,7 @@ async def delete_chat(
         raise HTTPException(404, "Chat not found")
     member = db.query(ChatMember).filter(
         ChatMember.chat_id == chat_id,
-        ChatMember.user_id == current_user.id
+        ChatMember.user_id == current_user.id,
     ).first()
     if not member:
         raise HTTPException(403, "Not a member")
@@ -541,14 +905,14 @@ def search_messages(
 ):
     member = db.query(ChatMember).filter(
         ChatMember.chat_id == chat_id,
-        ChatMember.user_id == current_user.id
+        ChatMember.user_id == current_user.id,
     ).first()
     if not member:
         raise HTTPException(403, "Not a member")
     messages = db.query(Message).filter(
         Message.chat_id == chat_id,
         Message.is_deleted == False,
-        Message.text.ilike(f"%{q}%")
+        Message.text.ilike(f"%{q}%"),
     ).order_by(Message.created_at.desc()).limit(50).all()
     out = []
     for msg in messages:
@@ -559,7 +923,7 @@ def search_messages(
             text=msg.text, file_url=msg.file_url, file_type=msg.file_type,
             created_at=msg.created_at.isoformat(),
             edited_at=msg.edited_at.isoformat() if msg.edited_at else None,
-            is_deleted=False
+            is_deleted=False,
         ))
     return out
 
@@ -636,7 +1000,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str, db: Session = Dep
                     msg.edited_at = datetime.utcnow()
                     db.commit()
                     await manager.broadcast_to_chat(msg.chat_id, {
-                        "type": "edit", "message_id": mid, "text": new_text
+                        "type": "edit", "message_id": mid, "text": new_text,
                     }, db)
                 continue
 
@@ -647,7 +1011,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str, db: Session = Dep
                     msg.is_deleted = True
                     db.commit()
                     await manager.broadcast_to_chat(msg.chat_id, {
-                        "type": "delete", "message_id": mid
+                        "type": "delete", "message_id": mid,
                     }, db)
                 continue
 
@@ -660,7 +1024,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str, db: Session = Dep
             target_chat_id = None
             if chat_id:
                 if not db.query(ChatMember).filter(
-                    ChatMember.chat_id == chat_id, ChatMember.user_id == user_id
+                    ChatMember.chat_id == chat_id, ChatMember.user_id == user_id,
                 ).first():
                     continue
                 target_chat_id = chat_id
@@ -671,10 +1035,10 @@ async def websocket_endpoint(websocket: WebSocket, token: str, db: Session = Dep
                 subq = db.query(ChatMember.chat_id).filter(ChatMember.user_id == user_id).subquery()
                 chat_ids = [c[0] for c in db.query(ChatMember.chat_id).filter(
                     ChatMember.user_id == recipient.id,
-                    ChatMember.chat_id.in_(select(subq))
+                    ChatMember.chat_id.in_(select(subq)),
                 ).all()]
                 personal = db.query(Chat).filter(
-                    Chat.id.in_(chat_ids), Chat.is_group == False
+                    Chat.id.in_(chat_ids), Chat.is_group == False,
                 ).first()
                 if personal:
                     target_chat_id = personal.id
@@ -684,7 +1048,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str, db: Session = Dep
                     db.flush()
                     db.add_all([
                         ChatMember(chat_id=new_chat.id, user_id=user_id, role='owner'),
-                        ChatMember(chat_id=new_chat.id, user_id=recipient.id, role='member')
+                        ChatMember(chat_id=new_chat.id, user_id=recipient.id, role='member'),
                     ])
                     db.commit()
                     target_chat_id = new_chat.id
@@ -697,7 +1061,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str, db: Session = Dep
                 text=text if not file_url else None,
                 file_url=file_url or None,
                 file_type=file_type or None,
-                created_at=datetime.utcnow()
+                created_at=datetime.utcnow(),
             )
             db.add(new_msg)
             db.flush()
@@ -707,7 +1071,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str, db: Session = Dep
                 db.add(MessageRead(
                     message_id=new_msg.id,
                     user_id=m.user_id,
-                    read_at=datetime.utcnow() if m.user_id == user_id else None
+                    read_at=datetime.utcnow() if m.user_id == user_id else None,
                 ))
 
             for m in chat_members:
@@ -729,7 +1093,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str, db: Session = Dep
                 "file_url": file_url or None,
                 "file_type": file_type or None,
                 "created_at": new_msg.created_at.isoformat(),
-                "chat_id": target_chat_id
+                "chat_id": target_chat_id,
             }, db)
 
     except WebSocketDisconnect:
@@ -740,7 +1104,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str, db: Session = Dep
             await manager.broadcast_status(chat[0], user_id, False, db)
 
 
-# ---------- Mark as read ----------
+# ---------- Mark read ----------
 @app.post("/api/mark_read/{chat_id}")
 def mark_read(
     chat_id: int,
@@ -748,7 +1112,7 @@ def mark_read(
     db: Session = Depends(get_db)
 ):
     if not db.query(ChatMember).filter(
-        ChatMember.chat_id == chat_id, ChatMember.user_id == current_user.id
+        ChatMember.chat_id == chat_id, ChatMember.user_id == current_user.id,
     ).first():
         raise HTTPException(403, "Not a member")
 
@@ -759,7 +1123,7 @@ def mark_read(
     now = datetime.utcnow()
     existing = {r.message_id: r for r in db.query(MessageRead).filter(
         MessageRead.user_id == current_user.id,
-        MessageRead.message_id.in_(msg_ids)
+        MessageRead.message_id.in_(msg_ids),
     ).all()}
     for mid in msg_ids:
         if mid in existing:
@@ -782,11 +1146,11 @@ def get_message_history(
     if not msg:
         raise HTTPException(404, "Message not found")
     if not db.query(ChatMember).filter(
-        ChatMember.chat_id == msg.chat_id, ChatMember.user_id == current_user.id
+        ChatMember.chat_id == msg.chat_id, ChatMember.user_id == current_user.id,
     ).first():
         raise HTTPException(403, "Access denied")
     history = db.query(MessageHistory).filter(
-        MessageHistory.message_id == message_id
+        MessageHistory.message_id == message_id,
     ).order_by(MessageHistory.edited_at).all()
     return [{"old_text": h.old_text, "edited_at": h.edited_at.isoformat()} for h in history]
 
@@ -799,7 +1163,7 @@ async def export_chat(
     db: Session = Depends(get_db)
 ):
     if not db.query(ChatMember).filter(
-        ChatMember.chat_id == chat_id, ChatMember.user_id == current_user.id
+        ChatMember.chat_id == chat_id, ChatMember.user_id == current_user.id,
     ).first():
         raise HTTPException(403, "Not a member")
     chat = db.query(Chat).get(chat_id)
@@ -813,7 +1177,7 @@ async def export_chat(
         chat_name = other.username if other else "Chat"
 
     messages = db.query(Message).filter(
-        Message.chat_id == chat_id, Message.is_deleted == False
+        Message.chat_id == chat_id, Message.is_deleted == False,
     ).order_by(Message.created_at).all()
 
     html = (
@@ -842,7 +1206,7 @@ async def export_chat(
         path,
         filename=f"chat_{chat_id}_{datetime.now().strftime('%Y%m%d')}.pdf",
         media_type='application/pdf',
-        background=BackgroundTask(lambda: os.unlink(path) if os.path.exists(path) else None)
+        background=BackgroundTask(lambda: os.unlink(path) if os.path.exists(path) else None),
     )
 
 
@@ -854,7 +1218,7 @@ def get_connection_logs(
     db: Session = Depends(get_db)
 ):
     logs = db.query(ConnectionLog).filter(
-        ConnectionLog.user_id == current_user.id
+        ConnectionLog.user_id == current_user.id,
     ).order_by(ConnectionLog.timestamp.desc()).limit(limit).all()
     return [{"event_type": l.event_type, "reason": l.reason, "timestamp": l.timestamp.isoformat()} for l in logs]
 
@@ -868,13 +1232,13 @@ def subscribe(
 ):
     db.query(PushSubscription).filter(
         PushSubscription.user_id == current_user.id,
-        PushSubscription.endpoint == subscription.endpoint
+        PushSubscription.endpoint == subscription.endpoint,
     ).delete()
     db.add(PushSubscription(
         user_id=current_user.id,
         endpoint=subscription.endpoint,
         p256dh=subscription.keys.get("p256dh", ""),
-        auth=subscription.keys.get("auth", "")
+        auth=subscription.keys.get("auth", ""),
     ))
     db.commit()
     from push_utils import cleanup_duplicate_subscriptions
@@ -904,7 +1268,7 @@ def search_users(
 ):
     users = db.query(User).filter(
         or_(User.username.ilike(f"%{q}%"), User.nickname.ilike(f"%{q}%")),
-        User.id != current_user.id
+        User.id != current_user.id,
     ).limit(10).all()
     return [{"id": u.id, "username": u.username, "nickname": u.nickname} for u in users]
 

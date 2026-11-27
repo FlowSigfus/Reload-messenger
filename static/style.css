@@ -897,3 +897,66 @@ body.retro-theme     .chats-list::-webkit-scrollbar-thumb { background: #8b7a6b;
     .modal-content        { max-height: 90vh; margin: 16px; width: auto; }
     .login-card           { width: 90%; margin: 0 auto; }
 }
+
+/* ===== 2FA: код-поле в модалке и backup-коды ===== */
+#totp-confirm-code,
+#email-2fa-code,
+#login-2fa-code {
+font-family: 'SF Mono', Consolas, monospace;
+letter-spacing: 2px;
+text-align: center;
+font-size: 18px;
+}
+#totp-secret-display {
+font-family: 'SF Mono', Consolas, monospace;
+}
+#backup-codes-list {
+user-select: all;
+overflow-x: auto;
+}
+body.dark-theme #totp-secret-display,
+body.dark-theme #backup-codes-list {
+    background: #3a3f4b !important;
+    color: #e4e6eb;
+}
+body.cyberpunk-theme #totp-secret-display,
+body.cyberpunk-theme #backup-codes-list {
+    background: #0f1722 !important;
+    color: #00ffcc;
+    border: 1px solid #00ffcc;
+}
+body.retro-theme #totp-secret-display,
+body.retro-theme #backup-codes-list {
+    background: #fffdf9 !important;
+    color: #2c2b28;
+    border: 1px solid #8b7a6b;
+}
+
+#2fa-status {
+padding: 8px 12px;
+background: #f0f0f0;
+border-radius: 8px;
+font-size: 13px;
+}
+body.dark-theme #2fa-status { background: #3a3f4b; color: #b0b3b8; }
+body.cyberpunk-theme #2fa-status { background: #0f1722; color: #8bb9b0; }
+body.retro-theme #2fa-status { background: #fffdf9; color: #2c2b28; border: 1px solid #cbb99b; border-radius: 0; }
+
+#2fa-disable-btn {
+background: #dc3545 !important;
+color: #fff !important;
+}
+#2fa-disable-btn:hover {
+background: #b02a37 !important;
+}
+
+#totp-qr-img {
+border: 4px solid #fff;
+}
+body.dark-theme #totp-qr-img { border-color: #3a3f4b; }
+body.cyberpunk-theme #totp-qr-img { border-color: #0f1722; }
+
+/* Форма входа — блок login-main / login-2fa плавно */
+#login-main, #login-2fa, #forgot-password-form, #reset-password-form {
+transition: opacity 0.2s;
+}

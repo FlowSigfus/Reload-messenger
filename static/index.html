@@ -11,17 +11,35 @@
 <body>
     <div id="login-form" class="login-overlay">
         <div class="login-card">
-            <h2>Вход / Регистрация</h2>
-            <input type="text" id="username" placeholder="Имя пользователя (латиница, цифры, _)">
-            <input type="password" id="password" placeholder="Пароль">
-            <div id="register-fields" style="display: none;">
-                <input type="email" id="register-email" placeholder="Email (для восстановления пароля)">
+            <h2 id="login-title">Вход / Регистрация</h2>
+
+            <div id="login-main">
+                <input type="text" id="username" placeholder="Имя пользователя (латиница, цифры, _)">
+                <input type="password" id="password" placeholder="Пароль">
+                <div id="register-fields" style="display: none;">
+                    <input type="email" id="register-email" placeholder="Email (для восстановления пароля)">
+                </div>
+                <div class="login-buttons">
+                    <button id="show-register-fields" class="secondary-btn">Регистрация</button>
+                    <button id="login-btn" class="primary-btn">Войти</button>
+                </div>
+                <a href="#" id="show-forgot-password" class="forgot-link">Забыли пароль?</a>
             </div>
-            <div class="login-buttons">
-                <button id="show-register-fields" class="secondary-btn">Регистрация</button>
-                <button id="login-btn" class="primary-btn">Войти</button>
+
+            <div id="login-2fa" style="display: none;">
+                <p style="font-size:13px;color:#888;margin-bottom:12px;">
+                    Введите 6-значный код из приложения-аутентификатора
+                    или резервный код (формата xxxx-xxxx).
+                </p>
+                <input type="text" id="login-2fa-code" placeholder="000000 или xxxx-xxxx" maxlength="12" autocomplete="one-time-code">
+                <div class="login-buttons">
+                    <button id="login-2fa-cancel" class="secondary-btn">Отмена</button>
+                    <button id="login-2fa-submit" class="primary-btn">Войти</button>
+                </div>
+                <button id="login-2fa-send-email" class="secondary-btn" style="width:100%;margin-top:10px;display:none;">
+                    Отправить код на email
+                </button>
             </div>
-            <a href="#" id="show-forgot-password" class="forgot-link">Забыли пароль?</a>
 
             <div id="forgot-password-form" style="display: none;">
                 <h3 style="margin-bottom: 12px; font-size: 15px;">Сброс пароля</h3>
@@ -105,10 +123,53 @@
         <button data-action="delete">🗑️ Удалить чат</button>
     </div>
 
+    <!-- ========== 2FA: TOTP setup modal ========== -->
+    <div id="totp-setup-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header"><h3>Настройка TOTP</h3><button class="close-modal">&times;</button></div>
+            <p style="margin-bottom:12px;">1. Отсканируйте QR-код в Google Authenticator, Aegis, 1Password или аналогичном:</p>
+            <div style="text-align: center; margin-bottom:16px;">
+                <img id="totp-qr-img" style="max-width: 240px; border-radius: 8px;">
+            </div>
+            <p style="margin-bottom:8px; font-size:13px;">Или введите секрет вручную:</p>
+            <code id="totp-secret-display" style="word-break: break-all; display: block; padding: 10px; background: #f0f0f0; border-radius: 8px; font-size: 13px; margin-bottom: 16px;"></code>
+            <p style="margin-bottom:8px;">2. Введите 6-значный код из приложения:</p>
+            <input type="text" id="totp-confirm-code" placeholder="000000" maxlength="6" autocomplete="one-time-code" style="width:100%;padding:12px;border:1px solid #ccc;border-radius:12px;">
+            <div class="modal-footer">
+                <button id="totp-confirm-btn" class="primary-btn">Подтвердить</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ========== 2FA: backup codes modal ========== -->
+    <div id="backup-codes-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header"><h3>Резервные коды</h3><button class="close-modal">&times;</button></div>
+            <p style="margin-bottom:12px;">Сохраните эти коды в надёжном месте. Каждый можно использовать <b>один раз</b>, если потеряете доступ к приложению/email.</p>
+            <pre id="backup-codes-list" style="background:#f0f0f0;padding:16px;border-radius:8px;font-family:monospace;font-size:15px;line-height:1.6;"></pre>
+            <div class="modal-footer" style="gap:8px;">
+                <button id="backup-codes-copy-btn" class="secondary-btn">Скопировать</button>
+                <button class="close-modal primary-btn">Готово</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ========== 2FA: email confirm modal ========== -->
+    <div id="email-2fa-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header"><h3>Email OTP</h3><button class="close-modal">&times;</button></div>
+            <p style="margin-bottom:12px;">Мы отправили 6-значный код на ваш email. Введите его для подтверждения:</p>
+            <input type="text" id="email-2fa-code" placeholder="000000" maxlength="6" autocomplete="one-time-code" style="width:100%;padding:12px;border:1px solid #ccc;border-radius:12px;">
+            <div class="modal-footer">
+                <button id="email-2fa-confirm-btn" class="primary-btn">Подтвердить</button>
+            </div>
+        </div>
+    </div>
+
     <div id="group-modal" class="modal">
         <div class="modal-content">
             <div class="modal-header"><h3>Новый чат / группа</h3><button class="close-modal">&times;</button></div>
-            <p style="font-size:13px;color:#888;margin-bottom:12px;">Один участник — обычный чат. Двое и больше — группа (название обязательно).</p>
+            <p style="font-size:13px;color:#888;margin-bottom:12px;">Один участник — обычный чат. Двое и больше — группа.</p>
             <input type="text" id="group-name" placeholder="Название группы (если >1 участника)">
             <input type="text" id="user-search" placeholder="Поиск пользователей...">
             <div id="search-results" class="search-results"></div>
@@ -185,6 +246,19 @@
             <div class="settings-item"><label>Имя:</label><input type="text" id="profile-first-name"></div>
             <div class="settings-item"><label>Фамилия:</label><input type="text" id="profile-last-name"></div>
             <div class="settings-item"><label>Год рождения:</label><input type="number" id="profile-birth-year"></div>
+
+            <!-- ========== 2FA section ========== -->
+            <div class="settings-item" style="border-top: 1px solid #e0e0e0; padding-top: 16px; margin-top: 4px;">
+                <label>🔐 Двухфакторная аутентификация</label>
+                <div id="2fa-status" style="font-size:13px;color:#666;margin-bottom:4px;"></div>
+                <div style="display:flex;flex-direction:column;gap:8px;">
+                    <button id="2fa-setup-totp-btn" class="secondary-btn">Настроить TOTP</button>
+                    <button id="2fa-enable-email-btn" class="secondary-btn">Включить Email OTP</button>
+                    <button id="2fa-regenerate-backup-btn" class="secondary-btn" style="display:none;">Перегенерировать резервные коды</button>
+                    <button id="2fa-disable-btn" class="secondary-btn" style="display:none;background:#dc3545;">Отключить 2FA</button>
+                </div>
+            </div>
+
             <div class="modal-footer"><button id="save-profile-btn" class="primary-btn">Сохранить</button></div>
         </div>
     </div>

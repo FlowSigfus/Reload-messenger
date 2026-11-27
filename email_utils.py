@@ -38,6 +38,15 @@ def send_password_reset_email(to_email: str, token: str):
     return send_email(to_email, subject, body)
 
 
+def send_2fa_code_email(to_email: str, code: str):
+    subject = "Код подтверждения — Reload Messenger"
+    body = (
+        f"Ваш код для входа: {code}\n\n"
+        f"Код действует 10 минут. Если вы не пытались войти — смените пароль."
+    )
+    return send_email(to_email, subject, body)
+
+
 def send_email(to_email: str, subject: str, body: str) -> bool:
     if not all([EMAIL_HOST, EMAIL_USER, EMAIL_PASSWORD]):
         print(
